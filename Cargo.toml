@@ -44,6 +44,10 @@ testing = [
 	"std",
 ]
 
+[dependencies.radium]
+git = "https://github.com/myrrlyn/radium.git"
+version = "0.2"
+
 [dependencies.serde]
 default-features = false
 features = [

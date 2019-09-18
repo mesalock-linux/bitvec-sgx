@@ -24,6 +24,7 @@ use core::{
 		UpperHex,
 	},
 	mem::size_of,
+	sync::atomic::Ordering::Relaxed,
 	ops::{
 		BitAnd,
 		BitAndAssign,
@@ -36,11 +37,10 @@ use core::{
 	},
 };
 
+use radium::RadiumBits;
+
 #[cfg(feature = "atomic")]
-use core::sync::atomic::{
-	self,
-	Ordering::Relaxed,
-};
+use core::sync::atomic;
 
 #[cfg(not(feature = "atomic"))]
 use core::cell::Cell;
@@ -441,9 +441,6 @@ where T: BitStore {
 	fn load(&self) -> T;
 }
 
-/* FIXME(myrrlyn): When the `radium` crate publishes generic traits, erase the
-implementations currently in use and enable the generic implementation below:
-
 impl<T, R> BitAccess<T> for R
 where T: BitStore, R: RadiumBits<T> {
 	#[inline(always)]
@@ -463,215 +460,9 @@ where T: BitStore, R: RadiumBits<T> {
 	where C: Cursor {
 		self.fetch_xor(*C::mask(bit), Relaxed);
 	}
-}
-*/
-
-#[cfg(feature = "atomic")] fn _atom() {
-
-impl BitAccess<u8> for atomic::AtomicU8 {
-	#[inline(always)]
-	fn clear_bit<C>(&self, bit: BitIdx<u8>)
-	where C: Cursor {
-		self.fetch_and(!*C::mask(bit), Relaxed);
-	}
 
 	#[inline(always)]
-	fn set_bit<C>(&self, bit: BitIdx<u8>)
-	where C: Cursor {
-		self.fetch_or(*C::mask(bit), Relaxed);
-	}
-
-	#[inline(always)]
-	fn invert_bit<C>(&self, bit: BitIdx<u8>)
-	where C: Cursor {
-		self.fetch_xor(*C::mask(bit), Relaxed);
-	}
-
-	#[inline(always)]
-	fn load(&self) -> u8 {
+	fn load(&self) -> T {
 		self.load(Relaxed)
 	}
-}
-
-impl BitAccess<u16> for atomic::AtomicU16 {
-	#[inline(always)]
-	fn clear_bit<C>(&self, bit: BitIdx<u16>)
-	where C: Cursor {
-		self.fetch_and(!*C::mask(bit), Relaxed);
-	}
-
-	#[inline(always)]
-	fn set_bit<C>(&self, bit: BitIdx<u16>)
-	where C: Cursor {
-		self.fetch_or(*C::mask(bit), Relaxed);
-	}
-
-	#[inline(always)]
-	fn invert_bit<C>(&self, bit: BitIdx<u16>)
-	where C: Cursor {
-		self.fetch_xor(*C::mask(bit), Relaxed);
-	}
-
-	#[inline(always)]
-	fn load(&self) -> u16 {
-		self.load(Relaxed)
-	}
-}
-
-impl BitAccess<u32> for atomic::AtomicU32 {
-	#[inline(always)]
-	fn clear_bit<C>(&self, bit: BitIdx<u32>)
-	where C: Cursor {
-		self.fetch_and(!*C::mask(bit), Relaxed);
-	}
-
-	#[inline(always)]
-	fn set_bit<C>(&self, bit: BitIdx<u32>)
-	where C: Cursor {
-		self.fetch_or(*C::mask(bit), Relaxed);
-	}
-
-	#[inline(always)]
-	fn invert_bit<C>(&self, bit: BitIdx<u32>)
-	where C: Cursor {
-		self.fetch_xor(*C::mask(bit), Relaxed);
-	}
-
-	#[inline(always)]
-	fn load(&self) -> u32 {
-		self.load(Relaxed)
-	}
-}
-
-#[cfg(target_pointer_width = "64")]
-impl BitAccess<u64> for atomic::AtomicU64 {
-	#[inline(always)]
-	fn clear_bit<C>(&self, bit: BitIdx<u64>)
-	where C: Cursor {
-		self.fetch_and(!*C::mask(bit), Relaxed);
-	}
-
-	#[inline(always)]
-	fn set_bit<C>(&self, bit: BitIdx<u64>)
-	where C: Cursor {
-		self.fetch_or(*C::mask(bit), Relaxed);
-	}
-
-	#[inline(always)]
-	fn invert_bit<C>(&self, bit: BitIdx<u64>)
-	where C: Cursor {
-		self.fetch_xor(*C::mask(bit), Relaxed);
-	}
-
-	#[inline(always)]
-	fn load(&self) -> u64 {
-		self.load(Relaxed)
-	}
-}
-
-}
-
-#[cfg(not(feature = "atomic"))] fn _cell() {
-
-impl BitAccess<u8> for Cell<u8> {
-	#[inline(always)]
-	fn clear_bit<C>(&self, bit: BitIdx<u8>)
-	where C: Cursor {
-		self.set(self.get() & !*C::mask(bit));
-	}
-
-	#[inline(always)]
-	fn set_bit<C>(&self, bit: BitIdx<u8>)
-	where C: Cursor {
-		self.set(self.get() | *C::mask(bit));
-	}
-
-	#[inline(always)]
-	fn invert_bit<C>(&self, bit: BitIdx<u8>)
-	where C: Cursor {
-		self.set(self.get() ^ *C::mask(bit));
-	}
-
-	#[inline(always)]
-	fn load(&self) -> u8 {
-		self.get()
-	}
-}
-
-impl BitAccess<u16> for Cell<u16> {
-	#[inline(always)]
-	fn clear_bit<C>(&self, bit: BitIdx<u16>)
-	where C: Cursor {
-		self.set(self.get() & !*C::mask(bit));
-	}
-
-	#[inline(always)]
-	fn set_bit<C>(&self, bit: BitIdx<u16>)
-	where C: Cursor {
-		self.set(self.get() | *C::mask(bit));
-	}
-
-	#[inline(always)]
-	fn invert_bit<C>(&self, bit: BitIdx<u16>)
-	where C: Cursor {
-		self.set(self.get() ^ *C::mask(bit));
-	}
-
-	#[inline(always)]
-	fn load(&self) -> u16 {
-		self.get()
-	}
-}
-
-impl BitAccess<u32> for Cell<u32> {
-	#[inline(always)]
-	fn clear_bit<C>(&self, bit: BitIdx<u32>)
-	where C: Cursor {
-		self.set(self.get() & !*C::mask(bit));
-	}
-
-	#[inline(always)]
-	fn set_bit<C>(&self, bit: BitIdx<u32>)
-	where C: Cursor {
-		self.set(self.get() | *C::mask(bit));
-	}
-
-	#[inline(always)]
-	fn invert_bit<C>(&self, bit: BitIdx<u32>)
-	where C: Cursor {
-		self.set(self.get() ^ *C::mask(bit));
-	}
-
-	#[inline(always)]
-	fn load(&self) -> u32 {
-		self.get()
-	}
-}
-
-#[cfg(target_pointer_width = "64")]
-impl BitAccess<u64> for Cell<u64> {
-	#[inline(always)]
-	fn clear_bit<C>(&self, bit: BitIdx<u64>)
-	where C: Cursor {
-		self.set(self.get() & !*C::mask(bit));
-	}
-
-	#[inline(always)]
-	fn set_bit<C>(&self, bit: BitIdx<u64>)
-	where C: Cursor {
-		self.set(self.get() | *C::mask(bit));
-	}
-
-	#[inline(always)]
-	fn invert_bit<C>(&self, bit: BitIdx<u64>)
-	where C: Cursor {
-		self.set(self.get() ^ *C::mask(bit));
-	}
-
-	#[inline(always)]
-	fn load(&self) -> u64 {
-		self.get()
-	}
-}
-
 }
