@@ -428,6 +428,18 @@ where T: BitStore {
 	fn load(&self) -> T {
 		radium::Radium::load(self, Relaxed)
 	}
+
+	/// Alias for `radium::RadiumBits::fetch_and(self, mask, Relaxed)`.
+	#[inline(always)]
+	fn erase_bits(&self, mask: T) {
+		self.fetch_and(mask, Relaxed);
+	}
+
+	/// Alias for `radium::RadiumBits::fetch_or(self, mask, Relaxed)`.
+	#[inline(always)]
+	fn write_bits(&self, mask: T) {
+		self.fetch_or(mask, Relaxed);
+	}
 }
 
 impl<T, R> BitAccess<T> for R

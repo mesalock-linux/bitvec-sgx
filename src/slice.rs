@@ -2212,7 +2212,7 @@ where T: BitStore {
 			},
 			//  The live domain crosses an element boundary
 			BitDomain::Major(head, left, middle, right, _) => {
-				assert!(middle.is_empty(), "Invalid memory representation!");
+				assert!(middle.is_empty(), "Invalid memory representation");
 
 				let left_mask = !(T::bits(true) << (T::BITS - *head));
 				let low = (left.load() >> *head) & left_mask;
@@ -2244,6 +2244,10 @@ where T: BitStore {
 	///   range indexing from a parent slice to retarget as needed.
 	/// - `value`: A user-provided value whose `self.len()` least significant
 	///   bits will be stored into `self`.
+	///
+	/// # Panics
+	///
+	/// `self` must have a length no greater than the bit width of `T`.
 	pub fn store(&mut self, value: T) {
 		let len = self.len();
 		assert!(
@@ -2258,16 +2262,40 @@ where T: BitStore {
 		match self.bitptr().domain_mut() {
 			BitDomainMut::Empty => return,
 			BitDomainMut::Minor(head, elt, _) => {
-
-				#[cfg(feature = "atomic")] {
-				elt.fetch_and(!(mask << *head));
-				elt.fetch_or(value << *head);
-				}
-
-				#[cfg(not(feature = "atomic"))]
-				unimplemented!("FIXME(myrrlyn)")
+				//  Erase the storage region in memory
+				elt.erase_bits(!(mask << *head));
+				//  Write the value into the storage region.
+				elt.write_bits(value << *head);
 			},
-			_ => unimplemented!(),
+			BitDomainMut::Major(head, left, middle, right, _) => {
+				assert!(middle.is_empty(), "Invalid memory representation");
+
+				//  Split the value at `T::BITS - *head`.
+				let mid = T::BITS - *head;
+				let low = value & !(T::bits(true) << mid);
+				let high = value >> mid;
+
+				//  Erase the high `mid` bits of the left element,
+				left.erase_bits(T::bits(true) >> mid);
+				//  Then write the low `mid` bits of the value into that slot.
+				left.write_bits(low << *head);
+
+				//  Erase the low `len - mid` bits of the right element,
+				right.erase_bits(T::bits(true) << (len as u8 - mid));
+				//  Then write the high
+				right.write_bits(high);
+			},
+			BitDomainMut::PartialHead(head, front, rest) => {
+				assert!(rest.is_empty(), "Invalid memory representation");
+				front.erase_bits(T::bits(true) >> (T::BITS - *head));
+				front.write_bits(value << *head);
+			}
+			BitDomainMut::PartialTail(rest, back, _) => {
+				assert!(rest.is_empty(), "Invalid memory representation");
+				back.erase_bits(!mask);
+				back.write_bits(value);
+			},
+			BitDomainMut::Spanning(body) => body[0] = value,
 		}
 	}
 }
