@@ -430,12 +430,26 @@ where T: BitStore {
 	}
 
 	/// Alias for `radium::RadiumBits::fetch_and(self, mask, Relaxed)`.
+	///
+	/// # Parameters
+	///
+	/// - `&self`
+	/// - `mask`: A bitmask. The zero bits in the mask will set low the
+	///   corresponding bits of `self`; the one bits in the mask will leave the
+	///   corresponding bits untouched.
 	#[inline(always)]
 	fn erase_bits(&self, mask: T) {
 		self.fetch_and(mask, Relaxed);
 	}
 
 	/// Alias for `radium::RadiumBits::fetch_or(self, mask, Relaxed)`.
+	///
+	/// # Parameters
+	///
+	/// - `&self`
+	/// - `mask`: A bitmask. The one bits in the mask will set high the
+	///   corresponding bits of `self`; the zero bits in the mask will leave the
+	///   corresponding bits untouched.
 	#[inline(always)]
 	fn write_bits(&self, mask: T) {
 		self.fetch_or(mask, Relaxed);

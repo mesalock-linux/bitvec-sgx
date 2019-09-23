@@ -12,7 +12,6 @@ use crate::{
 	bits::BitsMut,
 	cursor::{
 		Cursor,
-		LittleEndian,
 		Local,
 	},
 	domain::*,
@@ -2176,130 +2175,6 @@ where C: Cursor, T: BitStore {
 	}
 }
 
-impl<T> BitSlice<LittleEndian, T>
-where T: BitStore {
-	/// Loads a sequence of bits from `self` into the least-significant bits of
-	/// an element.
-	///
-	/// # Parameters
-	///
-	/// - `&self`: A read reference to some bits in memory. This slice must have
-	///   already been cut down to no more than the width of `T`, using range
-	///   indexing from a parent slice to retarget as needed.
-	///
-	/// # Returns
-	///
-	/// An element with all of `self`’s bits copied into the `self.len()` least
-	/// significant bits.
-	///
-	/// # Panics
-	///
-	/// `self` must have a length no greater than the bit width of `T`.
-	pub fn load(&self) -> T {
-		let len = self.len();
-		assert!(
-			len <= T::BITS as usize,
-			"Cannot load {} bits into a {}-bit element",
-			len,
-			T::BITS,
-		);
-		let low_mask = || !(T::bits(true) << len as u8);
-		match self.bitptr().domain() {
-			BitDomain::Empty => T::bits(false),
-			//  The live domain is in the middle of the element
-			BitDomain::Minor(head, elt, _) => {
-				(elt.load() >> *head) & low_mask()
-			},
-			//  The live domain crosses an element boundary
-			BitDomain::Major(head, left, middle, right, _) => {
-				assert!(middle.is_empty(), "Invalid memory representation");
-
-				let left_mask = !(T::bits(true) << (T::BITS - *head));
-				let low = (left.load() >> *head) & left_mask;
-
-				let high = right.load() << *head;
-
-				(high | low) & low_mask()
-			},
-			//  The live domain touches MSbit but not LSbit
-			BitDomain::PartialHead(head, front, rest) => {
-				assert!(rest.is_empty(), "Invalid memory representation");
-				front.load() >> *head
-			},
-			//  The live domain touches LSbit but not MSbit
-			BitDomain::PartialTail(rest, back, _) => {
-				assert!(rest.is_empty(), "Invalid memory representation");
-				back.load() & low_mask()
-			},
-			BitDomain::Spanning(body) => body[0],
-		}
-	}
-
-	/// Stores a sequence of bits from the user into the domain of `self`.
-	///
-	/// # Parameters
-	///
-	/// - `&mut self`: A write reference to some bits in memory. This slice must
-	///   have already been cut down to no more than the width of `T`, using
-	///   range indexing from a parent slice to retarget as needed.
-	/// - `value`: A user-provided value whose `self.len()` least significant
-	///   bits will be stored into `self`.
-	///
-	/// # Panics
-	///
-	/// `self` must have a length no greater than the bit width of `T`.
-	pub fn store(&mut self, value: T) {
-		let len = self.len();
-		assert!(
-			len <= T::BITS as usize,
-			"Cannot store {} bits from a {}-bit element",
-			len,
-			T::BITS,
-		);
-		let mask = !(T::bits(true) << len as u8);
-		//  Mask away any unusable bits in `value`.
-		let value = value & mask;
-		match self.bitptr().domain_mut() {
-			BitDomainMut::Empty => return,
-			BitDomainMut::Minor(head, elt, _) => {
-				//  Erase the storage region in memory
-				elt.erase_bits(!(mask << *head));
-				//  Write the value into the storage region.
-				elt.write_bits(value << *head);
-			},
-			BitDomainMut::Major(head, left, middle, right, _) => {
-				assert!(middle.is_empty(), "Invalid memory representation");
-
-				//  Split the value at `T::BITS - *head`.
-				let mid = T::BITS - *head;
-				let low = value & !(T::bits(true) << mid);
-				let high = value >> mid;
-
-				//  Erase the high `mid` bits of the left element,
-				left.erase_bits(T::bits(true) >> mid);
-				//  Then write the low `mid` bits of the value into that slot.
-				left.write_bits(low << *head);
-
-				//  Erase the low `len - mid` bits of the right element,
-				right.erase_bits(T::bits(true) << (len as u8 - mid));
-				//  Then write the high
-				right.write_bits(high);
-			},
-			BitDomainMut::PartialHead(head, front, rest) => {
-				assert!(rest.is_empty(), "Invalid memory representation");
-				front.erase_bits(T::bits(true) >> (T::BITS - *head));
-				front.write_bits(value << *head);
-			}
-			BitDomainMut::PartialTail(rest, back, _) => {
-				assert!(rest.is_empty(), "Invalid memory representation");
-				back.erase_bits(!mask);
-				back.write_bits(value);
-			},
-			BitDomainMut::Spanning(body) => body[0] = value,
-		}
-	}
-}
-
 /// Creates an owned `BitVec<C, T>` from a borrowed `BitSlice<C, T>`.
 #[cfg(feature = "alloc")]
 impl<C, T> ToOwned for BitSlice<C, T>
@@ -2858,6 +2733,7 @@ where C: Cursor, T: 'a + BitStore {
 unsafe impl<'a, C, T> Send for BitGuard<'a, C, T>
 where C: Cursor, T: 'a + BitStore {}
 
+mod field;
 mod iter;
 mod ops;
 
