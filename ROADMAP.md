@@ -3,6 +3,72 @@
 This document lists out some future work items, with varying levels of detail
 for their requirements or path to implementation.
 
+## Bitfield Access
+
+While `bitvec` was designed originally for sequential single-bit access, over
+the course of its implementation and growth it has shown suitability for
+describing sub-element slices that users may want to use as load/store targets
+for parallel single-shot access, equivalent to how bitfields work in C and C++.
+
+There are several design constraints here:
+
+- while single-bit access can use any arbitrary `Cursor` implementation,
+  multiple-bit access requires a single contiguous mask region. This will
+  require either another marker trait that carries contiguity and position
+  information, *or* implementing the access APIs on concrete `Cursor` types
+  rather than generically.
+
+- Start with `LittleEndian`, and use knowledge gained from that to determine the
+  correct approach to `BigEndian`. A good API for the user will be to use the
+  `n` least-significant bits of the element value to hold the bits loaded from
+  or stored into a `BitSlice`.
+
+- Use `BitDomain` to compute access masks
+
+  For an `n`-bit access that spans elements `a` and `b`, the split API will
+  produce a span reference over the highest `m` bits of `a` and a separate span
+  over the lowest `n - m` bits of `b`. The `BitStore` API is responsible for
+  correctly separating and rejoining value transfers according to these spans.
+
+- Type-level integers are arguably the more correct way to encode `uN` bus
+  widths, but until then, run-time parameters are sufficient. As the common path
+  will be to use source values rather than run-time values, these can probably
+  get const-propagated at the call site if the inliner is in operation.
+
+- `BitSlice` will need to perform bus mask construction for the user value,
+  which is just `(1 << n) - 1)`, and for the memory regions, which would be done
+  through a `Cursor` ranging API. This may eventually grow into an `IdxRange`
+  and `PosRange` sibling pair to `BitIdx`/`BitPos`, mediated by the `Cursor` or
+  maybe a `BitRange` trait. The user would provide the inputs to the index
+  range, then `Cursor` is responsible for producing positional bus masks that
+  can be applied to elements.
+
+  Rejoining split elements will only be done by shifting and overlaying, which
+  is why this feature will begin as `LE`-only and then *maybe* extend to `BE`.
+  If in the course of implementation, I am able to discover a generalizable way
+  to perform arbitrary bus access, this restriction may be lifted.
+
+  Such behavior is more for theoretical purity than deliverable behavior. Any
+  use cases that require discontiguous support will, in practice, approach the
+  current behavior of using single-bit access in iteration.
+
+- Eventually, it might be nice to do batched work between `BitSlice`s of the
+  same `<C, T>` pair, but that is something that would have to be informed by
+  specialized work before it can be correctly generalized. This is essentially a
+  new interpretation of the misaligned-`memmove` problem.
+
+Notes:
+
+- `x86` defines the [Bit Manipulation Instruction Set][bmis] which would be nice
+  to explicitly support where possible. Unfortunately, without exposed compiler
+  intrinsics, this would require writing bare assembly in a nightly-only feature
+  and using either compile- or run- time target capability detection to actually
+  use.
+
+  In practice, it is probably better to continue using the shift/mask source
+  operations and permit the compiler to detect where they can be replaced with
+  BMIS instructions.
+
 ## Consider a Fallible API
 
 The current implementation relies on `panic!` for all error behavior. This has
@@ -83,3 +149,4 @@ Not candidates:
 [#49146]: https://github.com/rust-lang/rust/issues/49146
 [#51909]: https://github.com/rust-lang/rust/issues/51909
 [#57563]: https://github.com/rust-lang/rust/issues/57563
+[bmis]: https://en.wikipedia.org/wiki/Bit_Manipulation_Instruction_Sets

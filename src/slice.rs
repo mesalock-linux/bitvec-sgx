@@ -12,6 +12,7 @@ use crate::{
 	bits::BitsMut,
 	cursor::{
 		Cursor,
+		LittleEndian,
 		Local,
 	},
 	domain::*,
@@ -2172,6 +2173,102 @@ where C: Cursor, T: BitStore {
 	/// [`BitPtr`]: ../pointer/struct.BitPtr.html
 	pub(crate) fn bitptr(&self) -> BitPtr<T> {
 		BitPtr::from_bitslice(self)
+	}
+}
+
+impl<T> BitSlice<LittleEndian, T>
+where T: BitStore {
+	/// Loads a sequence of bits from `self` into the least-significant bits of
+	/// an element.
+	///
+	/// # Parameters
+	///
+	/// - `&self`: A read reference to some bits in memory. This slice must have
+	///   already been cut down to no more than the width of `T`, using range
+	///   indexing from a parent slice to retarget as needed.
+	///
+	/// # Returns
+	///
+	/// An element with all of `self`’s bits copied into the `self.len()` least
+	/// significant bits.
+	///
+	/// # Panics
+	///
+	/// `self` must have a length no greater than the bit width of `T`.
+	pub fn load(&self) -> T {
+		let len = self.len();
+		assert!(
+			len <= T::BITS as usize,
+			"Cannot load {} bits into a {}-bit element",
+			len,
+			T::BITS,
+		);
+		let low_mask = || !(T::bits(true) << len as u8);
+		match self.bitptr().domain() {
+			BitDomain::Empty => T::bits(false),
+			//  The live domain is in the middle of the element
+			BitDomain::Minor(head, elt, _) => {
+				(elt.load() >> *head) & low_mask()
+			},
+			//  The live domain crosses an element boundary
+			BitDomain::Major(head, left, middle, right, _) => {
+				assert!(middle.is_empty(), "Invalid memory representation!");
+
+				let left_mask = !(T::bits(true) << (T::BITS - *head));
+				let low = (left.load() >> *head) & left_mask;
+
+				let high = right.load() << *head;
+
+				(high | low) & low_mask()
+			},
+			//  The live domain touches MSbit but not LSbit
+			BitDomain::PartialHead(head, front, rest) => {
+				assert!(rest.is_empty(), "Invalid memory representation");
+				front.load() >> *head
+			},
+			//  The live domain touches LSbit but not MSbit
+			BitDomain::PartialTail(rest, back, _) => {
+				assert!(rest.is_empty(), "Invalid memory representation");
+				back.load() & low_mask()
+			},
+			BitDomain::Spanning(body) => body[0],
+		}
+	}
+
+	/// Stores a sequence of bits from the user into the domain of `self`.
+	///
+	/// # Parameters
+	///
+	/// - `&mut self`: A write reference to some bits in memory. This slice must
+	///   have already been cut down to no more than the width of `T`, using
+	///   range indexing from a parent slice to retarget as needed.
+	/// - `value`: A user-provided value whose `self.len()` least significant
+	///   bits will be stored into `self`.
+	pub fn store(&mut self, value: T) {
+		let len = self.len();
+		assert!(
+			len <= T::BITS as usize,
+			"Cannot store {} bits from a {}-bit element",
+			len,
+			T::BITS,
+		);
+		let mask = !(T::bits(true) << len as u8);
+		//  Mask away any unusable bits in `value`.
+		let value = value & mask;
+		match self.bitptr().domain_mut() {
+			BitDomainMut::Empty => return,
+			BitDomainMut::Minor(head, elt, _) => {
+
+				#[cfg(feature = "atomic")] {
+				elt.fetch_and(!(mask << *head));
+				elt.fetch_or(value << *head);
+				}
+
+				#[cfg(not(feature = "atomic"))]
+				unimplemented!("FIXME(myrrlyn)")
+			},
+			_ => unimplemented!(),
+		}
 	}
 }
 

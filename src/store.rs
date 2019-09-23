@@ -28,6 +28,7 @@ use core::{
 	ops::{
 		BitAnd,
 		BitAndAssign,
+		BitOr,
 		BitOrAssign,
 		Not,
 		Shl,
@@ -61,6 +62,7 @@ pub trait BitStore:
 	//  Element-wise binary manipulation
 	+ BitAnd<Self, Output=Self>
 	+ BitAndAssign<Self>
+	+ BitOr<Self, Output=Self>
 	+ BitOrAssign<Self>
 	//  Permit indexing into a generic array
 	+ Copy
