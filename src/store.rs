@@ -300,19 +300,15 @@ pub type Word = u32;
 #[cfg(target_pointer_width = "64")]
 pub type Word = u64;
 
-/** Common interface for atomic and cellular shared-mutability wrappers.
+/** Single-bit interface for shared/mutable memory access.
 
 `&/mut BitSlice` contexts must use the `BitStore::Nucleus` type for all
 reference production, and must route through this trait in order to access the
-underlying memory. In multi-threaded contexts, this trait enforces that all
-access is synchronized through atomic accesses; in single-threaded contexts,
-this trait solely permits modification of an aliased element.
-
-It is implemented on the atomic type wrappers when the `atomic` feature is set,
-and implemented on the `Cell` type wrapper when the feature is missing. Coupled
-with the `Send` implementation on `BitSlice`
+underlying memory. This trait extends the `RadiumBits` element-wise shared
+mutable access with single-bit operations suited for the behavior of the overall
+crate.
 **/
-pub trait BitAccess<T>: Sized
+pub trait BitAccess<T>: RadiumBits<T>
 where T: BitStore {
 	/// Sets a specific bit in an element low.
 	///
@@ -329,8 +325,11 @@ where T: BitStore {
 	///
 	/// - `&self`
 	/// - `place`: The semantic bit index in the `self` element.
+	#[inline(always)]
 	fn clear_bit<C>(&self, place: BitIdx<T>)
-	where C: Cursor;
+	where C: Cursor {
+		self.fetch_and(!*C::mask(place), Relaxed);
+	}
 
 	/// Sets a specific bit in an element high.
 	///
@@ -347,15 +346,21 @@ where T: BitStore {
 	///
 	/// - `&self`
 	/// - `place`: The semantic bit index in the `self` element.
+	#[inline(always)]
 	fn set_bit<C>(&self, place: BitIdx<T>)
-	where C: Cursor;
+	where C: Cursor {
+		self.fetch_or(*C::mask(place), Relaxed);
+	}
 
 	/// Inverts a specific bit in an element.
 	///
 	/// This is the driver of `BitStore::invert_bit`, and has the same API and
 	/// documented behavior.
+	#[inline(always)]
 	fn invert_bit<C>(&self, place: BitIdx<T>)
-	where C: Cursor;
+	where C: Cursor {
+		self.fetch_xor(*C::mask(place), Relaxed);
+	}
 
 	/// Gets a specific bit in an element.
 	///
@@ -373,9 +378,10 @@ where T: BitStore {
 	/// # Type Parameters
 	///
 	/// - `C`: A `Cursor` implementation to translate the index into a position.
+	#[inline(always)]
 	fn get<C>(&self, place: BitIdx<T>) -> bool
 	where C: Cursor {
-		self.load() & *C::mask(place) != T::from(0)
+		radium::Radium::load(self, Relaxed) & *C::mask(place) != T::from(0)
 	}
 
 	/// Sets a specific bit in an element to a given value.
@@ -391,25 +397,6 @@ where T: BitStore {
 		else {
 			self.clear_bit::<C>(place);
 		}
-	}
-
-	/// Removes the shared-mutability wrapper, producing a read reference to the
-	/// inner type.
-	///
-	/// # Parameters
-	///
-	/// - `&self`
-	///
-	/// # Returns
-	///
-	/// A read reference to the wrapped type.
-	///
-	/// # Safety
-	///
-	/// As this removes mutability, it is strictly safe.
-	#[inline(always)]
-	fn base(&self) -> &T {
-		unsafe { &*(self as *const Self as *const T) }
 	}
 
 	/// Transforms a reference of `&[T::Nucleus]` into `&mut [T]`.
@@ -429,40 +416,17 @@ where T: BitStore {
 	///
 	/// A mutable reference to the wrapped interior type of the `this` referent.
 	#[inline(always)]
-	unsafe fn base_slice_mut(this: &[Self]) -> &mut [T] {
+	unsafe fn base_slice_mut(this: &[Self]) -> &mut [T]
+	where Self: Sized {
 		&mut *(this as *const [Self] as *const [T] as *mut [T])
 	}
 
 	/// Performs a synchronized load on an unsynchronized reference.
-	///
-	/// Atomic implementors must ensure that the load is well synchronized, and
-	/// cell implementors can just read. Each implementor must be strictly gated
-	/// on the `atomic` feature flag.
-	fn load(&self) -> T;
+	#[inline(always)]
+	fn load(&self) -> T {
+		radium::Radium::load(self, Relaxed)
+	}
 }
 
 impl<T, R> BitAccess<T> for R
-where T: BitStore, R: RadiumBits<T> {
-	#[inline(always)]
-	fn clear_bit<C>(&self, bit: BitIdx<T>)
-	where C: Cursor {
-		self.fetch_and(!*C::mask(bit), Relaxed);
-	}
-
-	#[inline(always)]
-	fn set_bit<C>(&self, bit: BitIdx<T>)
-	where C: Cursor {
-		self.fetch_or(*C::mask(bit), Relaxed);
-	}
-
-	#[inline(always)]
-	fn invert_bit<C>(&self, bit: BitIdx<T>)
-	where C: Cursor {
-		self.fetch_xor(*C::mask(bit), Relaxed);
-	}
-
-	#[inline(always)]
-	fn load(&self) -> T {
-		self.load(Relaxed)
-	}
-}
+where T: BitStore, R: RadiumBits<T> {}
