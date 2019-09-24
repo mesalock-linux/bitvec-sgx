@@ -18,7 +18,25 @@ use crate::{
 	},
 };
 
-impl<T> BitSlice<LittleEndian, T>
+/** Permit a specific `BitSlice` to be used for C-style bitfield access.
+
+Cursors that permit batched access to regions of memory are enabled to load data
+from a `BitSlice` and store data to a `BitSlice` with faster behavior than the
+default bit-by-bit traversal.
+
+This trait transfers data between a `BitSlice` and an element. The trait
+functions always place the live bit region against the least significant bit
+edge of the transfer element (return value for `load`, argument for `store`).
+
+Implementations are encouraged to preserve in-memory bit ordering, so that call
+sites can provide a value pattern that the user can clearly see matches what
+they expect for memory ordering. These methods merely move data from a fixed
+location in an element to a variable location in the slice.
+
+Methods should be called as `bits[start .. end].load_or_store()`, where the
+range subslice selects up to but no more than the `T::BITS` width.
+**/
+pub trait BitField<T>
 where T: BitStore {
 	/// Loads a sequence of bits from `self` into the least-significant bits of
 	/// an element.
@@ -37,7 +55,28 @@ where T: BitStore {
 	///
 	/// If `self` is the empty slice, or wider than an element, then this
 	/// returns `None`.
-	pub fn load(&self) -> Option<T> {
+	fn load(&self) -> Option<T>;
+
+	/// Stores a sequence of bits from the user into the domain of `self`.
+	///
+	/// # Parameters
+	///
+	/// - `&mut self`: A write reference to some bits in memory. This slice must
+	///   have already been cut down to no more than the width of `T`, using
+	///   range indexing from a parent slice to retarget as needed.
+	/// - `value`: A user-provided value whose `self.len()` least significant
+	///   bits will be stored into `self`.
+	///
+	/// # Behavior
+	///
+	/// If `self` is the empty slice, or wider than an element, then this exits
+	/// without effect.
+	fn store(&mut self, value: T);
+}
+
+impl<T> BitField<T> for BitSlice<LittleEndian, T>
+where T: BitStore {
+	fn load(&self) -> Option<T> {
 		let len = self.len();
 		if len == 0 || len > T::BITS as usize {
 			return None;
@@ -97,21 +136,7 @@ where T: BitStore {
 		}
 	}
 
-	/// Stores a sequence of bits from the user into the domain of `self`.
-	///
-	/// # Parameters
-	///
-	/// - `&mut self`: A write reference to some bits in memory. This slice must
-	///   have already been cut down to no more than the width of `T`, using
-	///   range indexing from a parent slice to retarget as needed.
-	/// - `value`: A user-provided value whose `self.len()` least significant
-	///   bits will be stored into `self`.
-	///
-	/// # Behavior
-	///
-	/// If `self` is the empty slice, or wider than an element, then this exits
-	/// without effect.
-	pub fn store(&mut self, value: T) {
+	fn store(&mut self, value: T) {
 		let len = self.len();
 		if len == 0 || len > T::BITS as usize {
 			return;
@@ -170,26 +195,9 @@ where T: BitStore {
 	}
 }
 
-impl<T> BitSlice<BigEndian, T>
+impl<T> BitField<T> for BitSlice<BigEndian, T>
 where T: BitStore {
-	/// Loads a sequence of bits from `self` into the least-significant bits of
-	/// an element.
-	///
-	/// # Parameters
-	///
-	/// - `&self`: A read reference to some bits in memory. This slice must have
-	///   already been cut down to no more than the width of `T`, using range
-	///   indexing from a parent slice to retarget as needed.
-	///
-	/// # Returns
-	///
-	/// If `self` has a length greater than zero, and not greater than the width
-	/// of `T` in memory, then this returns an element whose least `self.len()`
-	/// significant bits are filled with the bits of `self`.
-	///
-	/// If `self` is the empty slice, or wider than an element, then this
-	/// returns `None`.
-	pub fn load(&self) -> Option<T> {
+	fn load(&self) -> Option<T> {
 		let len = self.len();
 		if len == 0 || len > T::BITS as usize {
 			return None;
@@ -253,21 +261,7 @@ where T: BitStore {
 		}
 	}
 
-	/// Stores a sequence of bits from the user into the domain of `self`.
-	///
-	/// # Parameters
-	///
-	/// - `&mut self`: A write reference to some bits in memory. This slice must
-	///   have already been cut down to no more than the width of `T`, using
-	///   range indexing from a parent slice to retarget as needed.
-	/// - `value`: A user-provided value whose `self.len()` least significant
-	///   bits will be stored into `self`.
-	///
-	/// # Behavior
-	///
-	/// If `self` is the empty slice, or wider than an element, then this exits
-	/// without effect.
-	pub fn store(&mut self, value: T) {
+	fn store(&mut self, value: T) {
 		let len = self.len();
 		if len == 0 || len > T::BITS as usize {
 			return;

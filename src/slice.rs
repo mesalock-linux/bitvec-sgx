@@ -2737,6 +2737,7 @@ mod field;
 mod iter;
 mod ops;
 
+pub use field::BitField;
 pub use iter::*;
 
 #[cfg(test)]
