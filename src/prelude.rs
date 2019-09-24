@@ -15,7 +15,10 @@ pub use crate::{
 		LittleEndian,
 		Local,
 	},
-	slice::BitSlice,
+	slice::{
+		BitField,
+		BitSlice,
+	},
 	store::{
 		BitStore,
 		Word,

@@ -1,5 +1,18 @@
-/*!
+/*! Bitfield-style access to `BitSlice` memory regions.
 
+The rest of the crate is built around the concept of single-bit access, and
+multiple bits are written into or read out of a slice through iteration. This is
+safe and fully general, but is not efficient for a common use case wanted by
+what the crate provides: memory access on units smaller than an element, and/or
+misaligned from the element boundaries.
+
+Bitfield access cannot be safely generalized across all cursors. It requires
+some concept of contiguity in the underlying memory, which each cursor must
+implement themselves.
+
+This module provides a trait, `BitField`, which permits single-element
+load/store access on arbitrary `BitSlice`s, and implementations of it on the
+two cursors `BigEndian` and `LittleEndian` provided by the crate.
 !*/
 
 use crate::{
@@ -35,6 +48,11 @@ location in an element to a variable location in the slice.
 
 Methods should be called as `bits[start .. end].load_or_store()`, where the
 range subslice selects up to but no more than the `T::BITS` width.
+
+Without access to the `=` transfer operator, this trait cannot provide native
+syntax for access, and must resort to named methods. This is admittedly less
+convenient than the equivalent C++ library implementation, but probably a safer
+language choice overall.
 **/
 pub trait BitField<T>
 where T: BitStore {
@@ -69,13 +87,25 @@ where T: BitStore {
 	///
 	/// # Behavior
 	///
-	/// If `self` is the empty slice, or wider than an element, then this exits
-	/// without effect.
+	/// Implementations are permitted to either exit silently, or panic, when
+	/// `self` is either the empty slice or wider than an element.
 	fn store(&mut self, value: T);
 }
 
 impl<T> BitField<T> for BitSlice<LittleEndian, T>
 where T: BitStore {
+	/// Reads data out of `self`. See trait documentation.
+	///
+	/// # Examples
+	///
+	/// ```rust
+	/// use bitvec::prelude::*;
+	///
+	/// let base = 0xABCDu16;
+	/// let bits = base.bits::<LittleEndian>();
+	///
+	/// assert_eq!(bits[.. 12].load(), Some(0x0BCDu16));
+	/// ```
 	fn load(&self) -> Option<T> {
 		let len = self.len();
 		if len == 0 || len > T::BITS as usize {
@@ -83,8 +113,6 @@ where T: BitStore {
 		}
 
 		match self.bitptr().domain() {
-			BitDomain::Empty => None,
-
 			//  The live region of `self` is in the interior of a single
 			//  element, touching neither edge.
 			BitDomain::Minor(head, elt, _) => {
@@ -130,12 +158,38 @@ where T: BitStore {
 
 			//  `self` fills an element, so that element is just copied.
 			BitDomain::Spanning(body) => Some(body[0]),
+
+			//  This is statically unreachable, since the empty case already
+			//  returned up above.
+			BitDomain::Empty => None,
 		}
 	}
 
+	/// Writes data into `self`. See trait documentation.
+	///
+	/// In debug mode, this panics on empty or too-wide slices; in release mode,
+	/// it exits without effect.
+	///
+	/// # Examples
+	///
+	/// ```rust
+	/// use bitvec::prelude::*;
+	///
+	/// let mut base = 0u16;
+	/// let bits = base.bits_mut::<LittleEndian>();
+	///
+	/// bits[ .. 12].store(0xFABC);
+	/// assert_eq!(base, 0x0ABC);
+	/// ```
 	fn store(&mut self, value: T) {
 		let len = self.len();
 		if len == 0 || len > T::BITS as usize {
+			//  Panic in debug mode.
+			#[cfg(debug_assertions)]
+			panic!("Cannot store {} bits in a {}-bit region", T::BITS, len);
+
+			//  Exit silently in release mode.
+			#[cfg(not(debug_assertions))]
 			return;
 		}
 
@@ -143,8 +197,6 @@ where T: BitStore {
 		let value = value & mask_for(len);
 
 		match self.bitptr().domain_mut() {
-			BitDomainMut::Empty => return,
-
 			BitDomainMut::Minor(head, elt, _) => {
 				//  Erase the storage region.
 				elt.erase_bits(!(mask_for::<T>(len) << *head));
@@ -185,12 +237,26 @@ where T: BitStore {
 			},
 
 			BitDomainMut::Spanning(body) => body[0] = value,
+
+			BitDomainMut::Empty => return,
 		}
 	}
 }
 
 impl<T> BitField<T> for BitSlice<BigEndian, T>
 where T: BitStore {
+	/// Reads data out of `self`. See trait documentation.
+	///
+	/// # Examples
+	///
+	/// ```rust
+	/// use bitvec::prelude::*;
+	///
+	/// let base = 0xABCDu16;
+	/// let bits = base.bits::<BigEndian>();
+	///
+	/// assert_eq!(bits[.. 12].load(), Some(0x0ABC));
+	/// ```
 	fn load(&self) -> Option<T> {
 		let len = self.len();
 		if len == 0 || len > T::BITS as usize {
@@ -198,8 +264,6 @@ where T: BitStore {
 		}
 
 		match self.bitptr().domain() {
-			BitDomain::Empty => None,
-
 			BitDomain::Minor(_, elt, tail) => {
 				Some((elt.load() >> T::BITS - *tail) & mask_for(len))
 			},
@@ -249,12 +313,36 @@ where T: BitStore {
 			},
 
 			BitDomain::Spanning(body) => Some(body[0]),
+
+			BitDomain::Empty => None,
 		}
 	}
 
+	/// Writes data into `self`. See trait documentation.
+	///
+	/// In debug mode, this panics on empty or too-wide slices; in release mode,
+	/// it exits without effect.
+	///
+	/// # Examples
+	///
+	/// ```rust
+	/// use bitvec::prelude::*;
+	///
+	/// let mut base = 0u16;
+	/// let bits = base.bits_mut::<BigEndian>();
+	///
+	/// bits[.. 12].store(0xFABC);
+	/// assert_eq!(base, 0xABC0);
+	/// ```
 	fn store(&mut self, value: T) {
 		let len = self.len();
 		if len == 0 || len > T::BITS as usize {
+			//  Panic in debug mode.
+			#[cfg(debug_assertions)]
+			panic!("Cannot store {} bits in a {}-bit region", T::BITS, len);
+
+			//  Exit silently in release mode.
+			#[cfg(not(debug_assertions))]
 			return;
 		}
 
@@ -262,8 +350,6 @@ where T: BitStore {
 		let value = value & mask_for(len);
 
 		match self.bitptr().domain_mut() {
-			BitDomainMut::Empty => return,
-
 			BitDomainMut::Minor(_, elt, tail) => {
 				//  Compute the distance between LSedge and the live region.
 				let ls_distance = T::BITS - *tail;
@@ -303,11 +389,17 @@ where T: BitStore {
 			},
 
 			BitDomainMut::Spanning(body) => body[0] = value,
+
+			BitDomainMut::Empty => return,
 		}
 	}
 }
 
 /// Safely computes an LSedge bitmask for a value of some length.
+///
+/// Shifting a value for `T::BITS` or more causes overflow panics, which is
+/// not ideal when shifting for exactly `T::BITS` is a thing that occasionally
+/// happens.
 ///
 /// # Parameters
 ///
@@ -338,14 +430,19 @@ mod tests {
 	use super::*;
 	use crate::bits::*;
 
+	#[cfg(feature = "std")]
 	#[test]
 	fn empty() {
 		assert!(BitSlice::<BigEndian, u64>::empty().load().is_none());
 		assert!(BitSlice::<LittleEndian, u64>::empty().load().is_none());
 
 		//  hit the early-exit branches
-		BitSlice::<BigEndian, u32>::empty_mut().store(0);
-		BitSlice::<LittleEndian, u32>::empty_mut().store(0);
+		assert!(std::panic::catch_unwind(|| {
+			BitSlice::<BigEndian, u32>::empty_mut().store(0);
+		}).is_err());
+		assert!(std::panic::catch_unwind(|| {
+			BitSlice::<LittleEndian, u32>::empty_mut().store(0);
+		}).is_err());
 	}
 
 	#[test]
