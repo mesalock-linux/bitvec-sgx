@@ -82,9 +82,6 @@ where T: BitStore {
 			return None;
 		}
 
-		//  Lazily produce a bitmask with the lowest `len` bits set high.
-		let low_mask = || !(T::bits(true) << len as u8);
-
 		match self.bitptr().domain() {
 			BitDomain::Empty => None,
 
@@ -92,7 +89,7 @@ where T: BitStore {
 			//  element, touching neither edge.
 			BitDomain::Minor(head, elt, _) => {
 				//  Load the entire element, shift to align with LSbit, and mask
-				Some((elt.load() >> *head) & low_mask())
+				Some((elt.load() >> *head) & mask_for(len))
 			},
 
 			/* The live region of self is in the interior of a two-element span,
@@ -119,7 +116,7 @@ where T: BitStore {
 				let low = left.load() >> *head;
 				//  Pull the low bits of `right`, and lift them above `low`.
 				let high = right.load() << mid;
-				Some((high | low) & low_mask())
+				Some((high | low) & mask_for(len))
 			},
 
 			//  This is equivalent to the `Minor` case, except that the live
@@ -129,7 +126,7 @@ where T: BitStore {
 
 			//  This is equivalent to the `Minor` case, except that the live
 			//  region is at the LSbit, so only the mask is required.
-			BitDomain::PartialTail(_, elt, _) => Some(elt.load() & low_mask()),
+			BitDomain::PartialTail(_, elt, _) => Some(elt.load() & mask_for(len)),
 
 			//  `self` fills an element, so that element is just copied.
 			BitDomain::Spanning(body) => Some(body[0]),
@@ -142,18 +139,15 @@ where T: BitStore {
 			return;
 		}
 
-		//  Produce a mask of the `len` least significant bits in `T`.
-		let mask = !(T::bits(true) << len as u8);
-
 		//  Mask away any unusable bits in `value`.
-		let value = value & mask;
+		let value = value & mask_for(len);
 
 		match self.bitptr().domain_mut() {
 			BitDomainMut::Empty => return,
 
 			BitDomainMut::Minor(head, elt, _) => {
 				//  Erase the storage region.
-				elt.erase_bits(!(mask << *head));
+				elt.erase_bits(!(mask_for::<T>(len) << *head));
 				//  Write the value into the storage region.
 				elt.write_bits(value << *head);
 			},
@@ -186,7 +180,7 @@ where T: BitStore {
 
 			//  The live region is directly at LSbit.
 			BitDomainMut::PartialTail(_, elt, _) => {
-				elt.erase_bits(!mask);
+				elt.erase_bits(!mask_for::<T>(len));
 				elt.write_bits(value);
 			},
 
@@ -203,14 +197,11 @@ where T: BitStore {
 			return None;
 		}
 
-		//  Lazily produce a bitmask with the lowest `len` bits set high.
-		let low_mask = || !(T::bits(true) << len as u8);
-
 		match self.bitptr().domain() {
 			BitDomain::Empty => None,
 
 			BitDomain::Minor(_, elt, tail) => {
-				Some((elt.load() >> T::BITS - *tail) & low_mask())
+				Some((elt.load() >> T::BITS - *tail) & mask_for(len))
 			},
 
 			/* The live region of self is in the interior of a two-element span,
@@ -243,12 +234,12 @@ where T: BitStore {
 				//  dead bits in `right`.
 				let low = right.load() >> T::BITS - *tail;
 				//  Recombine and mask.
-				Some((high | low) & low_mask())
+				Some((high | low) & mask_for(len))
 			},
 
 			//  This is equivalent to the `Minor` case, except that the live
 			//  region is at the LSbit, so only the mask is required.
-			BitDomain::PartialHead(_, elt, _) => Some(elt.load() & low_mask()),
+			BitDomain::PartialHead(_, elt, _) => Some(elt.load() & mask_for(len)),
 
 			//  This is equivalent to the `Minor` case, except that the live
 			//  region is at the MSbit, so no bits require masking after the
@@ -267,11 +258,8 @@ where T: BitStore {
 			return;
 		}
 
-		//  Produce a mask of the `len` least significant bits in `T`.
-		let mask = !(T::bits(true) << len as u8);
-
 		//  Mask away any unusable bits in `value`.
-		let value = value & mask;
+		let value = value & mask_for(len);
 
 		match self.bitptr().domain_mut() {
 			BitDomainMut::Empty => return,
@@ -282,7 +270,7 @@ where T: BitStore {
 
 				//  Move the value mask away from LSedge to cover the region,
 				//  and erase the region bits.
-				elt.erase_bits(!(mask << ls_distance));
+				elt.erase_bits(!(mask_for::<T>(len) << ls_distance));
 				//  Move the value away from LSedge and write into the region.
 				elt.write_bits(value << ls_distance);
 			},
@@ -304,7 +292,7 @@ where T: BitStore {
 
 			//  The live region is directly at LSbit.
 			BitDomainMut::PartialHead(_, elt, _) => {
-				elt.erase_bits(T::bits(true) << len as u8);
+				elt.erase_bits(!mask_for::<T>(len));
 				elt.write_bits(value);
 			},
 
@@ -316,5 +304,135 @@ where T: BitStore {
 
 			BitDomainMut::Spanning(body) => body[0] = value,
 		}
+	}
+}
+
+/// Safely computes an LSedge bitmask for a value of some length.
+///
+/// # Parameters
+///
+/// - `len`: The width in bits of the value stored in an element `T`.
+///
+/// # Type Parameters
+///
+/// - `T`: The `BitStore` type for which the mask is computed.
+///
+/// # Returns
+///
+/// An LSedge-aligned bitmask of `len` bits. All bits after the `len`th are
+/// zero.
+#[inline]
+fn mask_for<T>(len: usize) -> T
+where T: BitStore {
+	let len = len as u8;
+	if len >= T::BITS {
+		T::bits(true)
+	}
+	else {
+		!(T::bits(true) << len)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::bits::*;
+
+	#[test]
+	fn empty() {
+		assert!(BitSlice::<BigEndian, u64>::empty().load().is_none());
+		assert!(BitSlice::<LittleEndian, u64>::empty().load().is_none());
+
+		//  hit the early-exit branches
+		BitSlice::<BigEndian, u32>::empty_mut().store(0);
+		BitSlice::<LittleEndian, u32>::empty_mut().store(0);
+	}
+
+	#[test]
+	fn bitfields_minor() {
+		let mut base = 0u8;
+		let bits = base.bits_mut::<LittleEndian>();
+
+		bits[3 .. 7].store(255);
+		assert_eq!(bits[3 .. 7].load(), Some(15));
+
+		bits[3 .. 7].store(9);
+		assert_eq!(bits[3 .. 7].load(), Some(9));
+
+		assert_eq!(bits.as_slice(), &[0x48]);
+
+		bits.store(0);
+		let bits = base.bits_mut::<BigEndian>();
+
+		bits[3 .. 7].store(255);
+		assert_eq!(bits[3 .. 7].load(), Some(15));
+
+		bits[3 .. 7].store(6);
+		assert_eq!(bits[3 .. 7].load(), Some(6));
+	}
+
+	#[test]
+	fn bitfields_major() {
+		let mut base: [u8; 2] = [0, 0];
+		let bits = base.bits_mut::<LittleEndian>();
+
+		bits[5 .. 11].store(255);
+		assert_eq!(bits[5 .. 11].load(), Some(63));
+		assert_eq!(bits.as_slice(), &[0xE0, 0x07]);
+
+		let bits = base.bits_mut::<BigEndian>();
+
+		bits[5 .. 11].store(63);
+		assert_eq!(bits[5 .. 11].load(), Some(63));
+		assert_eq!(bits.as_slice(), &[0xE7, 0xE7]);
+		bits[.. 3].store(0);
+		assert_eq!(bits.as_slice(), &[0x07, 0xE7]);
+	}
+
+	#[test]
+	fn bitfields_partial_head() {
+		let mut base = 0u8;
+		let bits = base.bits_mut::<LittleEndian>();
+
+		bits[3 ..].store(255);
+		assert_eq!(bits[3 ..].load(), Some(31));
+		assert_eq!(bits.as_slice(), &[0xF8]);
+
+		bits.store(0);
+		let bits = base.bits_mut::<BigEndian>();
+
+		bits[3 ..].store(255);
+		assert_eq!(bits[3 ..].load(), Some(31));
+		assert_eq!(bits.as_slice(), &[0x1F]);
+	}
+
+	#[test]
+	fn bitfields_partial_tail() {
+		let mut base = 0u8;
+		let bits = base.bits_mut::<LittleEndian>();
+
+		bits[.. 6].store(255);
+		assert_eq!(bits[.. 6].load(), Some(63));
+		assert_eq!(bits.as_slice(), &[0x3F]);
+
+		bits.store(0);
+		let bits = base.bits_mut::<BigEndian>();
+
+		bits[.. 6].store(255);
+		assert_eq!(bits[.. 6].load(), Some(63));
+		assert_eq!(bits.as_slice(), &[0xFC]);
+	}
+
+	#[test]
+	fn bitfields_spanning() {
+		let mut base = 0u64;
+
+		let bits = base.bits_mut::<LittleEndian>();
+		bits.store(0x01234567_89abcdef);
+		assert_eq!(bits.load(), Some(0x01234567_89abcdef));
+
+		let bits = base.bits_mut::<BigEndian>();
+		bits.store(0x01234567_89abcdef);
+		assert_eq!(bits.load(), Some(0x01234567_89abcdef));
 	}
 }
