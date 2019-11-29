@@ -32,12 +32,18 @@ elements as a slice.
 #![cfg_attr(debug_assertions, warn(missing_docs))]
 #![cfg_attr(not(debug_assertions), deny(missing_docs))]
 #![deny(unconditional_recursion)]
+#![cfg_attr(all(feature = "mesalock_sgx",
+                not(target_env = "sgx")), no_std)]
+#![cfg_attr(all(target_env = "sgx", target_vendor = "mesalock"), feature(rustc_private))]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", target_env = "sgx"))]
 extern crate core;
+
+#[cfg(all(feature = "std", not(target_env = "sgx")))]
+extern crate sgx_tstd as std;
 
 #[cfg(feature = "serde")]
 extern crate serde;
