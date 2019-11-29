@@ -1,0 +1,216 @@
+diff --git a/src/domain.rs b/src/domain.rs
+index bb90fb2..cfee077 100644
+--- a/src/domain.rs
++++ b/src/domain.rs
+@@ -55,7 +55,7 @@ pub(crate) type Splat<'a, T, A> = Either<
+ - `T: BitStore` The type of the elements the domain inhabits.
+ **/
+ #[derive(Debug)]
+-pub(crate) enum BitDomain<'a, T>
++pub enum BitDomain<'a, T>
+ where T: 'a + BitStore
+ {
+ 	/// Empty domain.
+@@ -172,8 +172,8 @@ where T: BitStore
+ 	}
+ 
+ 	/// Tests if the variant is `Minor`.
+-	#[cfg(test)]
+-	pub(crate) fn is_minor(&self) -> bool {
++	//#[cfg(test)]
++	pub fn is_minor(&self) -> bool {
+ 		match self {
+ 			BitDomain::Minor(..) => true,
+ 			_ => false,
+@@ -181,8 +181,8 @@ where T: BitStore
+ 	}
+ 
+ 	/// Tests if the variant is `Major`.
+-	#[cfg(test)]
+-	pub(crate) fn is_major(&self) -> bool {
++	//#[cfg(test)]
++	pub fn is_major(&self) -> bool {
+ 		match self {
+ 			BitDomain::Major(..) => true,
+ 			_ => false,
+@@ -190,8 +190,8 @@ where T: BitStore
+ 	}
+ 
+ 	/// Tests if the variant is `PartialHead`.
+-	#[cfg(test)]
+-	pub(crate) fn is_partial_head(&self) -> bool {
++	//#[cfg(test)]
++	pub fn is_partial_head(&self) -> bool {
+ 		match self {
+ 			BitDomain::PartialHead(..) => true,
+ 			_ => false,
+@@ -199,8 +199,8 @@ where T: BitStore
+ 	}
+ 
+ 	/// Tests if the variant is `PartialTail`.
+-	#[cfg(test)]
+-	pub(crate) fn is_partial_tail(&self) -> bool {
++	//#[cfg(test)]
++	pub fn is_partial_tail(&self) -> bool {
+ 		match self {
+ 			BitDomain::PartialTail(..) => true,
+ 			_ => false,
+@@ -208,7 +208,7 @@ where T: BitStore
+ 	}
+ 
+ 	/// Tests if the variant is `Spanning`.
+-	pub(crate) fn is_spanning(&self) -> bool {
++	pub fn is_spanning(&self) -> bool {
+ 		match self {
+ 			BitDomain::Spanning(..) => true,
+ 			_ => false,
+diff --git a/src/fields.rs b/src/fields.rs
+index a58a5f2..98c7edd 100644
+--- a/src/fields.rs
++++ b/src/fields.rs
+@@ -884,7 +884,7 @@ An LS-edge-aligned bitmask of `len` bits. All bits higher than the `len`th are
+ zero.
+ **/
+ #[inline]
+-fn mask_for<T>(len: usize) -> T
++pub fn mask_for<T>(len: usize) -> T
+ where T: BitStore {
+ 	let len = len as u8;
+ 	if len >= T::BITS {
+@@ -916,7 +916,7 @@ essentially a generic-aware version of the `as` operator.
+ The result of transforming `value as U`. Where `U` is wider than `T`, this
+ zero-extends; where `U` is narrower, it truncates.
+ **/
+-fn resize<T, U>(value: T) -> U
++pub fn resize<T, U>(value: T) -> U
+ where
+ 	T: BitStore,
+ 	U: BitStore,
+diff --git a/src/indices.rs b/src/indices.rs
+index e50a304..18e1b4c 100644
+--- a/src/indices.rs
++++ b/src/indices.rs
+@@ -42,7 +42,7 @@ pub struct BitIdx<T>
+ where T: BitStore
+ {
+ 	/// Semantic index within an element. Constrained to `0 .. T::BITS`.
+-	idx: u8,
++	pub idx: u8,
+ 	/// Marker for the indexed type.
+ 	_ty: PhantomData<T>,
+ }
+@@ -121,7 +121,7 @@ where T: BitStore
+ 	/// method has no way of checking this requirement.
+ 	///
+ 	/// [`ptr::offset`]: https://doc.rust-lang.org/stable/std/primitive.pointer.html#method.offset
+-	pub(crate) fn offset(self, by: isize) -> (isize, Self) {
++	pub fn offset(self, by: isize) -> (isize, Self) {
+ 		let val = *self;
+ 
+ 		//  Signed-add `*self` and the jump distance. Overflowing is the
+@@ -236,7 +236,7 @@ This type has no behavior other than viewing its internal `u8` for arithmetic.
+ - `T`: The memory element type controlled by this tail.
+ **/
+ #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+-pub(crate) struct BitTail<T>
++pub struct BitTail<T>
+ where T: BitStore
+ {
+ 	/// Semantic index *after* an element. Constrained to `0 ..= T::BITS`.
+@@ -338,7 +338,7 @@ pub struct BitPos<T>
+ where T: BitStore
+ {
+ 	/// Electrical position within an element. Constrained to `0 .. T::BITS`.
+-	pos: u8,
++	pub pos: u8,
+ 	/// Marker for the positioned type.
+ 	_ty: PhantomData<T>,
+ }
+@@ -533,7 +533,7 @@ and known-good values in marker types.
+ 
+ It is only implemented on `u8`.
+ **/
+-pub(crate) trait Indexable {
++pub trait Indexable {
+ 	/// Wraps a value as a `BitIdx<T>`.
+ 	fn idx<T>(self) -> BitIdx<T>
+ 	where T: BitStore;
+diff --git a/src/lib.rs b/src/lib.rs
+index 6f3270e..d059c5e 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -59,7 +59,7 @@ mod domain;
+ pub mod fields;
+ pub mod indices;
+ pub mod order;
+-mod pointer;
++pub mod pointer;
+ pub mod prelude;
+ pub mod slice;
+ pub mod store;
+diff --git a/src/pointer.rs b/src/pointer.rs
+index 14a94ec..8d855dc 100644
+--- a/src/pointer.rs
++++ b/src/pointer.rs
+@@ -50,7 +50,7 @@ crate ever breaks in the future.
+ **/
+ #[derive(Clone, Copy)]
+ #[doc(hidden)]
+-pub(crate) union Pointer<T>
++pub union Pointer<T>
+ where T: BitStore
+ {
+ 	/// A shareable pointer to some contended mutable data.
+@@ -91,7 +91,7 @@ where T: BitStore
+ 	///
+ 	/// The stored address, as a read pointer.
+ 	#[inline]
+-	pub(crate) fn r(self) -> *const T {
++	pub fn r(self) -> *const T {
+ 		unsafe { self.r }
+ 	}
+ 
+@@ -415,7 +415,7 @@ where T: BitStore
+ 	/// in the caller’s memory space. The caller is responsible for ensuring
+ 	/// that the slice of memory the produced `BitPtr<T>` describes is all
+ 	/// governable in the caller’s context.
+-	pub(crate) fn new(
++	pub fn new(
+ 		data: impl Into<Pointer<T>>,
+ 		head: BitIdx<T>,
+ 		bits: usize,
+@@ -515,7 +515,7 @@ where T: BitStore
+ 	/// This pointer must be valid in the user’s memory model and allocation
+ 	/// regime in order for the caller to dereference it.
+ 	#[inline]
+-	pub(crate) fn pointer(&self) -> Pointer<T> {
++	pub fn pointer(&self) -> Pointer<T> {
+ 		(self.ptr.as_ptr() as usize & Self::PTR_DATA_MASK).into()
+ 	}
+ 
+@@ -563,6 +563,7 @@ where T: BitStore
+ 	}
+ 
+ 	#[cfg(feature = "alloc")]
++    #[doc(hidden)]
+ 	pub unsafe fn set_head(&mut self, head: BitIdx<T>) {
+ 		let head = *head as usize;
+ 		let mut ptr = self.ptr.as_ptr() as usize;
+@@ -658,7 +659,7 @@ where T: BitStore
+ 	/// `1 ..= T::BITS`.
+ 	#[cfg(any(test, feature = "alloc"))]
+ 	#[inline]
+-	pub(crate) fn tail(&self) -> BitTail<T> {
++	pub fn tail(&self) -> BitTail<T> {
+ 		let (head, len) = (self.head(), self.len());
+ 
+ 		if *head == 0 && len == 0 {
+@@ -740,7 +741,7 @@ where T: BitStore
+ 	/// An enum containing the logical components of the domain governed by
+ 	/// `self`.
+ 	#[inline]
+-	pub(crate) fn domain<'a>(self) -> BitDomain<'a, T> {
++	pub fn domain<'a>(self) -> BitDomain<'a, T> {
+ 		self.into()
+ 	}
+ 
