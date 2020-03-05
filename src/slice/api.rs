@@ -12,7 +12,8 @@ be documented in a section called `API Differences`.
 
 use crate::{
 	access::BitAccess,
-	indices::BitIdx,
+	index::BitIdx,
+	mem::BitMemory,
 	order::BitOrder,
 	pointer::BitPtr,
 	slice::{
@@ -94,19 +95,19 @@ the lifetime of a host value for the slice, or by explicit annotation.
 
 ```rust
 use bitvec::{
-	indices::BitIdx,
-	order::Local,
-	slice,
-	slice::BitSlice,
+  index::BitIdx,
+  order::Local,
+  slice,
+  slice::BitSlice,
 };
 
 // manifest a slice for a single element
 let x = 42u8;
 let ptr = &x as *const u8;
 let bits: &BitSlice<Local, u8> = unsafe { slice::bits_from_raw_parts(
-	ptr,
-	BitIdx::new(2).unwrap(),
-	5
+  ptr,
+  BitIdx::new(2).unwrap(),
+  5
 ) };
 assert_eq!(bits.len(), 5);
 ```
@@ -115,7 +116,7 @@ assert_eq!(bits.len(), 5);
 **/
 pub unsafe fn bits_from_raw_parts<'a, O, T>(
 	data: *const T,
-	head: BitIdx<T>,
+	head: BitIdx<T::Mem>,
 	bits: usize,
 ) -> &'a BitSlice<O, T>
 where
@@ -148,7 +149,7 @@ arguments cause aliasing in the underlying memory positions.
 **/
 pub unsafe fn bits_from_raw_parts_mut<'a, O, T>(
 	data: *mut T,
-	head: BitIdx<T>,
+	head: BitIdx<T::Mem>,
 	bits: usize,
 ) -> &'a mut BitSlice<O, T>
 where
@@ -331,7 +332,7 @@ where
 	/// ```
 	#[inline]
 	pub fn first(&self) -> Option<&bool> {
-		0.get(self)
+		self.get(0)
 	}
 
 	/// Returns a mutable pointer to the first bit of the slice, or `None` if it
@@ -354,7 +355,7 @@ where
 	/// ```
 	#[inline]
 	pub fn first_mut(&mut self) -> Option<BitMut<O, T>> {
-		0.get_mut(self)
+		self.get_mut(0)
 	}
 
 	/// Returns the first and all the rest of the bits of the slice, or `None`
@@ -377,12 +378,21 @@ where
 		}
 		else {
 			let (head, rest) = self.split_at(1);
-			unsafe { Some((0.get_unchecked(head), rest)) }
+			unsafe { Some((head.get_unchecked(0), rest)) }
 		}
 	}
 
 	/// Returns the first and all the rest of the bits of the slice, or `None`
 	/// if it is empty.
+	///
+	/// # API Differences
+	///
+	/// The returned bit and slice references must be marked as aliasing, as
+	/// they are permitted to refer to the same memory element.
+	///
+	/// Note that the `<T as BitStore>::Alias` type parameter will stack up with
+	/// each successive call to `.split_first_mut`, as Rust does not have a way
+	/// to express flattening in associated types.
 	///
 	/// # Examples
 	///
@@ -398,13 +408,18 @@ where
 	/// assert_eq!(data, 7);
 	/// ```
 	#[inline]
-	pub fn split_first_mut(&mut self) -> Option<(BitMut<O, T>, &mut Self)> {
+	//  `pub type Aliased = BitSlice<O, T::Alias>;` is not allowed in inherents,
+	//  so this will not be aliased.
+	#[allow(clippy::type_complexity)]
+	pub fn split_first_mut(
+		&mut self,
+	) -> Option<(BitMut<O, T::Alias>, &mut BitSlice<O, T::Alias>)> {
 		if self.is_empty() {
 			None
 		}
 		else {
 			let (head, rest) = self.split_at_mut(1);
-			Some((unsafe { 0.get_unchecked_mut(head) }, rest))
+			Some((unsafe { head.get_unchecked_mut(0) }, rest))
 		}
 	}
 
@@ -427,13 +442,22 @@ where
 			0 => None,
 			len => {
 				let (rest, tail) = self.split_at(len - 1);
-				Some((unsafe { 0.get_unchecked(tail) }, rest))
+				Some((unsafe { tail.get_unchecked(0) }, rest))
 			},
 		}
 	}
 
 	/// Returns the last and all the rest of the bits of the slice, or `None` if
 	/// it is empty.
+	///
+	/// # API Differences
+	///
+	/// The returned bit and slice references must be marked as aliasing, as
+	/// they are permitted to refer to the same memory element.
+	///
+	/// Note that the `<T as BitStore>::Alias` type parameter will stack up with
+	/// each successive call to `.split_last_mut`, as Rust does not have a way
+	/// to express flattening in associated types.
 	///
 	/// # Examples
 	///
@@ -449,12 +473,17 @@ where
 	/// assert_eq!(data, 128 | 64 | 1);
 	/// ```
 	#[inline]
-	pub fn split_last_mut(&mut self) -> Option<(BitMut<O, T>, &mut Self)> {
+	//  `pub type Aliased = BitSlice<O, T::Alias>;` is not allowed in inherents,
+	//  so this will not be aliased.
+	#[allow(clippy::type_complexity)]
+	pub fn split_last_mut(
+		&mut self,
+	) -> Option<(BitMut<O, T::Alias>, &mut BitSlice<O, T::Alias>)> {
 		match self.len() {
 			0 => None,
 			len => {
 				let (rest, tail) = self.split_at_mut(len - 1);
-				Some((unsafe { 0.get_unchecked_mut(tail) }, rest))
+				Some((unsafe { tail.get_unchecked_mut(0) }, rest))
 			},
 		}
 	}
@@ -473,7 +502,7 @@ where
 	pub fn last(&self) -> Option<&bool> {
 		match self.len() {
 			0 => None,
-			len => Some(unsafe { (len - 1).get_unchecked(self) }),
+			len => Some(unsafe { self.get_unchecked(len - 1) }),
 		}
 	}
 
@@ -493,7 +522,7 @@ where
 	pub fn last_mut(&mut self) -> Option<BitMut<O, T>> {
 		match self.len() {
 			0 => None,
-			len => Some(unsafe { (len - 1).get_unchecked_mut(self) }),
+			len => Some(unsafe { self.get_unchecked_mut(len - 1) }),
 		}
 	}
 
@@ -674,7 +703,7 @@ where
 	/// let (head, rest) = bits.split_at_mut(4);
 	/// assert_eq!(head.as_mut_ptr(), rest.as_mut_ptr());
 	/// unsafe {
-	///     *head.as_mut_ptr() = 2;
+	///     *head.as_mut_ptr() = 2.into();
 	/// }
 	/// assert!(rest[2]);
 	/// ```
@@ -890,7 +919,7 @@ where
 	pub fn chunks_mut(&mut self, chunk_size: usize) -> ChunksMut<O, T> {
 		assert_ne!(chunk_size, 0, "Chunk width cannot be zero");
 		super::ChunksMut {
-			inner: self,
+			inner: self.alias_mut(),
 			width: chunk_size,
 		}
 	}
@@ -1074,7 +1103,7 @@ where
 	pub fn rchunks_mut(&mut self, chunk_size: usize) -> RChunksMut<O, T> {
 		assert_ne!(chunk_size, 0, "Chunk width cannot be zero");
 		RChunksMut {
-			inner: self,
+			inner: self.alias_mut(),
 			width: chunk_size,
 		}
 	}
@@ -1220,6 +1249,15 @@ where
 	/// `mid` itself) and the second will contain all indices from `[mid, len)`
 	/// (excluding the index `len` itself).
 	///
+	/// # API Differences
+	///
+	/// Rather than returning smaller `&mut Self`, this must return aliased
+	/// slices `&mut BitSlice<O, T::Alias>`. The split point may be in the
+	/// interior of an element, introducing alias conditions between the two
+	/// returned slices.
+	///
+	/// Use `.bit_domain_mut()` to regain access to unaliased memory.
+	///
 	/// # Panics
 	///
 	/// Panics if `mid > len`.
@@ -1240,8 +1278,15 @@ where
 	/// assert_eq!(data, 0b0100_1101);
 	/// ```
 	#[inline]
-	pub fn split_at_mut(&mut self, mid: usize) -> (&mut Self, &mut Self) {
-		let (head, tail) = self.split_at(mid);
+	//  `pub type Aliased = BitSlice<O, T::Alias>;` is not allowed in inherents,
+	//  so this will not be aliased.
+	#[allow(clippy::type_complexity)]
+	pub fn split_at_mut(
+		&mut self,
+		mid: usize,
+	) -> (&mut BitSlice<O, T::Alias>, &mut BitSlice<O, T::Alias>)
+	{
+		let (head, tail) = self.alias().split_at(mid);
 		(
 			head.bitptr().into_bitslice_mut(),
 			tail.bitptr().into_bitslice_mut(),
@@ -1347,7 +1392,7 @@ where
 	pub fn split_mut<F>(&mut self, func: F) -> SplitMut<'_, O, T, F>
 	where F: FnMut(usize, &bool) -> bool {
 		SplitMut {
-			inner: self,
+			inner: self.alias_mut(),
 			place: Some(0),
 			func,
 		}

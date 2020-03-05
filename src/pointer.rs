@@ -7,11 +7,11 @@ work.
 !*/
 
 use crate::{
-	domain::*,
-	indices::{
+	index::{
 		BitIdx,
 		Indexable,
 	},
+	mem::BitMemory,
 	order::BitOrder,
 	slice::BitSlice,
 	store::BitStore,
@@ -20,8 +20,10 @@ use crate::{
 use core::{
 	fmt::{
 		self,
+		Binary,
 		Debug,
 		Formatter,
+		Pointer,
 	},
 	marker::PhantomData,
 	mem::size_of,
@@ -30,7 +32,7 @@ use core::{
 };
 
 #[cfg(any(test, feature = "alloc"))]
-use crate::indices::BitTail;
+use crate::index::BitTail;
 
 /// Width in bits of a pointer on the target machine.
 const PTR_BITS: usize = size_of::<*const u8>() * 8;
@@ -48,9 +50,8 @@ crate ever breaks in the future.
 
 - `T`: The referent data type.
 **/
-#[derive(Clone, Copy)]
 #[doc(hidden)]
-pub(crate) union Pointer<T>
+pub(crate) union Address<T>
 where T: BitStore
 {
 	/// A shareable pointer to some contended mutable data.
@@ -63,7 +64,7 @@ where T: BitStore
 	u: usize,
 }
 
-impl<T> Pointer<T>
+impl<T> Address<T>
 where T: BitStore
 {
 	/// Accesses the address as a shared mutable pointer.
@@ -122,9 +123,21 @@ where T: BitStore
 	pub(crate) fn u(self) -> usize {
 		unsafe { self.u }
 	}
+
+	pub(crate) fn to_alias(self) -> *const T::Alias {
+		unsafe { self.r as *const T::Alias }
+	}
 }
 
-impl<T> From<&T> for Pointer<T>
+impl<T> Clone for Address<T>
+where T: BitStore
+{
+	fn clone(&self) -> Self {
+		Self { u: self.u() }
+	}
+}
+
+impl<T> From<&T> for Address<T>
 where T: BitStore
 {
 	fn from(r: &T) -> Self {
@@ -132,7 +145,7 @@ where T: BitStore
 	}
 }
 
-impl<T> From<*const T> for Pointer<T>
+impl<T> From<*const T> for Address<T>
 where T: BitStore
 {
 	fn from(r: *const T) -> Self {
@@ -140,7 +153,7 @@ where T: BitStore
 	}
 }
 
-impl<T> From<&mut T> for Pointer<T>
+impl<T> From<&mut T> for Address<T>
 where T: BitStore
 {
 	fn from(w: &mut T) -> Self {
@@ -148,7 +161,7 @@ where T: BitStore
 	}
 }
 
-impl<T> From<*mut T> for Pointer<T>
+impl<T> From<*mut T> for Address<T>
 where T: BitStore
 {
 	fn from(w: *mut T) -> Self {
@@ -156,12 +169,24 @@ where T: BitStore
 	}
 }
 
-impl<T> From<usize> for Pointer<T>
+impl<T> From<usize> for Address<T>
 where T: BitStore
 {
 	fn from(u: usize) -> Self {
 		Self { u }
 	}
+}
+
+impl<T> Pointer for Address<T>
+where T: BitStore
+{
+	fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+		write!(fmt, "0x{:0>1$X}", self.u(), PTR_BITS >> 2)
+	}
+}
+
+impl<T> Copy for Address<T> where T: BitStore
+{
 }
 
 /** In-memory representation of `&BitSlice` handles.
@@ -268,7 +293,7 @@ pointer and length values will be invalid for the memory model and allocation
 regime.
 **/
 #[repr(C)]
-#[derive(Clone, Copy, Eq, Hash, PartialEq, PartialOrd, Ord)]
+#[derive(Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct BitPtr<T = u8>
 where T: BitStore
 {
@@ -318,9 +343,10 @@ where T: BitStore
 	pub const PTR_DATA_MASK: usize = !Self::PTR_HEAD_MASK;
 	/// The number of low bits in `self.ptr` that are the high bits of the head
 	/// `BitIdx` cursor.
-	pub const PTR_HEAD_BITS: usize = T::INDX as usize - Self::LEN_HEAD_BITS;
+	pub const PTR_HEAD_BITS: usize = T::Mem::INDX as usize - Self::LEN_HEAD_BITS;
 	/// Marks the bits of `self.ptr` that are the `head` section.
-	pub const PTR_HEAD_MASK: usize = T::MASK as usize >> Self::LEN_HEAD_BITS;
+	pub const PTR_HEAD_MASK: usize =
+		T::Mem::MASK as usize >> Self::LEN_HEAD_BITS;
 
 	/// Produces an empty-slice representation.
 	///
@@ -364,7 +390,7 @@ where T: BitStore
 	/// The provided pointer must be either null, or valid in the caller’s
 	/// memory model and allocation regime.
 	#[cfg(feature = "alloc")]
-	pub(crate) fn uninhabited(ptr: impl Into<Pointer<T>>) -> Self {
+	pub(crate) fn uninhabited(ptr: impl Into<Address<T>>) -> Self {
 		let ptr = ptr.into();
 		//  Check that the pointer is properly aligned for the storage type.
 		//  Null pointers are always well aligned.
@@ -416,8 +442,8 @@ where T: BitStore
 	/// that the slice of memory the produced `BitPtr<T>` describes is all
 	/// governable in the caller’s context.
 	pub(crate) fn new(
-		data: impl Into<Pointer<T>>,
-		head: BitIdx<T>,
+		data: impl Into<Address<T>>,
+		head: BitIdx<T::Mem>,
 		bits: usize,
 	) -> Self
 	{
@@ -432,7 +458,7 @@ where T: BitStore
 			data.u().trailing_zeros() as usize >= Self::PTR_HEAD_BITS,
 			"BitPtr domain pointer ({:p}) to {} must be aligned to at least {}",
 			data.r(),
-			T::TYPENAME,
+			T::Mem::TYPENAME,
 			Self::PTR_HEAD_BITS,
 		);
 
@@ -477,8 +503,8 @@ where T: BitStore
 	///
 	/// [`::new`]: #method.new
 	pub(crate) unsafe fn new_unchecked(
-		data: impl Into<Pointer<T>>,
-		head: BitIdx<T>,
+		data: impl Into<Address<T>>,
+		head: BitIdx<T::Mem>,
 		bits: usize,
 	) -> Self
 	{
@@ -490,7 +516,7 @@ where T: BitStore
 		let len_head = head & Self::LEN_HEAD_MASK;
 		let len_bits = bits << Self::LEN_HEAD_BITS;
 
-		let ptr: Pointer<u8> = (ptr_data | ptr_head).into();
+		let ptr: Address<u8> = (ptr_data | ptr_head).into();
 
 		Self {
 			_ty: PhantomData,
@@ -515,7 +541,7 @@ where T: BitStore
 	/// This pointer must be valid in the user’s memory model and allocation
 	/// regime in order for the caller to dereference it.
 	#[inline]
-	pub(crate) fn pointer(&self) -> Pointer<T> {
+	pub(crate) fn pointer(&self) -> Address<T> {
 		(self.ptr.as_ptr() as usize & Self::PTR_DATA_MASK).into()
 	}
 
@@ -525,15 +551,14 @@ where T: BitStore
 	/// # Parameters
 	///
 	/// - `&mut self`
-	/// - `ptr: impl Into<Pointer<T>>`: The new address of the `BitPtr<T>`’s
-	///   domain.
+	/// - `ptr`: The new address of the `BitPtr<T>`’s domain.
 	///
 	/// # Safety
 	///
 	/// None. The invariants of `::new` must be checked at the caller.
 	#[inline]
 	#[cfg(feature = "alloc")]
-	pub(crate) unsafe fn set_pointer(&mut self, ptr: impl Into<Pointer<T>>) {
+	pub(crate) unsafe fn set_pointer(&mut self, ptr: impl Into<Address<T>>) {
 		let mut data = ptr.into();
 		if data.r().is_null() {
 			*self = Self::empty();
@@ -553,9 +578,9 @@ where T: BitStore
 	/// # Returns
 	///
 	/// A `BitIdx` that is the index of the first live bit in the first element.
-	/// This will be in the domain `0 .. T::BITS`.
+	/// This will be in the domain `0 .. T::Mem::BITS`.
 	#[inline]
-	pub fn head(&self) -> BitIdx<T> {
+	pub fn head(&self) -> BitIdx<T::Mem> {
 		let ptr = self.ptr.as_ptr() as usize;
 		let ptr_head = (ptr & Self::PTR_HEAD_MASK) << Self::LEN_HEAD_BITS;
 		let len_head = self.len & Self::LEN_HEAD_MASK;
@@ -563,7 +588,7 @@ where T: BitStore
 	}
 
 	#[cfg(feature = "alloc")]
-	pub unsafe fn set_head(&mut self, head: BitIdx<T>) {
+	pub unsafe fn set_head(&mut self, head: BitIdx<T::Mem>) {
 		let head = *head as usize;
 		let mut ptr = self.ptr.as_ptr() as usize;
 
@@ -618,12 +643,11 @@ where T: BitStore
 	///
 	/// # Returns
 	///
-	/// - `.0: Pointer<T>`: An opaque pointer to the `BitPtr<T>`’s memory
-	///   region.
-	/// - `.1: BitIdx`: The index of the first live bit in the bit region.
-	/// - `.2: usize`: The number of live bits in the bit region.
+	/// - `.0`: An opaque pointer to the `BitPtr<T>`’s memory region.
+	/// - `.1`: The index of the first live bit in the bit region.
+	/// - `.2`: The number of live bits in the bit region.
 	#[inline]
-	pub(crate) fn raw_parts(&self) -> (Pointer<T>, BitIdx<T>, usize) {
+	pub(crate) fn raw_parts(&self) -> (Address<T>, BitIdx<T::Mem>, usize) {
 		(self.pointer(), self.head(), self.len())
 	}
 
@@ -658,7 +682,7 @@ where T: BitStore
 	/// `1 ..= T::BITS`.
 	#[cfg(any(test, feature = "alloc"))]
 	#[inline]
-	pub(crate) fn tail(&self) -> BitTail<T> {
+	pub(crate) fn tail(&self) -> BitTail<T::Mem> {
 		let (head, len) = (self.head(), self.len());
 
 		if *head == 0 && len == 0 {
@@ -667,12 +691,18 @@ where T: BitStore
 
 		//  Compute the in-element tail index as the head plus the length,
 		//  modulated to the element width.
-		let tail = (*self.head() as usize + len) & T::MASK as usize;
+		let tail = (*self.head() as usize + len) & T::Mem::MASK as usize;
 		//  If the tail is zero, wrap it to `T::BITS` as the maximal. This
 		//  upshifts `1` (tail is zero) or `0` (tail is not), then sets the
 		//  upshift on the rest of the tail, producing something in the range
 		//  `1 ..= T::BITS`.
-		((((tail == 0) as u8) << T::INDX) | tail as u8).tail()
+		((((tail == 0) as u8) << T::Mem::INDX) | tail as u8).tail()
+	}
+
+	pub(crate) fn aliased_slice<'a>(&self) -> &'a [T::Alias] {
+		unsafe {
+			slice::from_raw_parts(self.pointer().to_alias(), self.elements())
+		}
 	}
 
 	/// Accesses the element slice behind the pointer as a Rust slice.
@@ -707,6 +737,7 @@ where T: BitStore
 	///
 	/// - `'a`: Lifetime for which the data behind the pointer is live.
 	#[inline]
+	#[cfg(feature = "alloc")]
 	pub fn as_mut_slice<'a>(&self) -> &'a mut [T] {
 		unsafe { slice::from_raw_parts_mut(self.pointer().w, self.elements()) }
 	}
@@ -729,26 +760,11 @@ where T: BitStore
 		unsafe { slice::from_raw_parts(self.pointer().a, self.elements()) }
 	}
 
-	/// Gets the domain for the region the pointer describes.
-	///
-	/// # Parameters
-	///
-	/// - `self`
-	///
-	/// # Returns
-	///
-	/// An enum containing the logical components of the domain governed by
-	/// `self`.
-	#[inline]
-	pub(crate) fn domain<'a>(self) -> BitDomain<'a, T> {
-		self.into()
-	}
-
 	/// Converts a `BitSlice` handle into its `BitPtr` representation.
 	///
 	/// # Parameters
 	///
-	/// - `bs: &BitSlice<O, T>`: a `BitSlice` handle
+	/// - `bs`: a `BitSlice` handle
 	///
 	/// # Returns
 	///
@@ -756,7 +772,7 @@ where T: BitStore
 	pub(crate) fn from_bitslice<O>(bs: &BitSlice<O, T>) -> Self
 	where O: BitOrder {
 		let src = unsafe { &*(bs as *const BitSlice<O, T> as *const [()]) };
-		let ptr = Pointer::from(src.as_ptr() as *const u8);
+		let ptr = Address::from(src.as_ptr() as *const u8);
 		let (ptr, len) = match (ptr.w(), src.len()) {
 			(_, 0) => (NonNull::dangling(), 0),
 			(p, _) if p.is_null() => unreachable!("Rust forbids null refs"),
@@ -782,7 +798,7 @@ where T: BitStore
 	where O: BitOrder {
 		unsafe {
 			&*(slice::from_raw_parts(
-				Pointer::from(self.ptr.as_ptr()).r() as *const (),
+				Address::from(self.ptr.as_ptr()).r() as *const (),
 				self.len,
 			) as *const [()] as *const BitSlice<O, T>)
 		}
@@ -801,7 +817,7 @@ where T: BitStore
 	where O: BitOrder {
 		unsafe {
 			&mut *(slice::from_raw_parts_mut(
-				Pointer::from(self.ptr.as_ptr()).w() as *mut (),
+				Address::from(self.ptr.as_ptr()).w() as *mut (),
 				self.len,
 			) as *mut [()] as *mut BitSlice<O, T>)
 		}
@@ -822,30 +838,11 @@ where T: BitStore
 	}
 }
 
-/** Gets write access to all elements in the underlying storage, including the
-partial head and tail elements.
-
-# Safety
-
-This is *unsafe* to use except from known mutable `BitSlice` structures.
-Mutability is not encoded in the `BitPtr` type system at this time, and thus is
-not enforced by the compiler yet.
-**/
-impl<T> AsMut<[T]> for BitPtr<T>
+impl<T> Clone for BitPtr<T>
 where T: BitStore
 {
-	fn as_mut(&mut self) -> &mut [T] {
-		self.as_mut_slice()
-	}
-}
-
-/// Gets read access to all elements in the underlying storage, including the
-/// partial head and tail elements.
-impl<T> AsRef<[T]> for BitPtr<T>
-where T: BitStore
-{
-	fn as_ref(&self) -> &[T] {
-		self.as_slice()
+	fn clone(&self) -> Self {
+		Self { ..*self }
 	}
 }
 
@@ -888,27 +885,31 @@ impl<T> Debug for BitPtr<T>
 where T: BitStore
 {
 	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-		struct HexPtr<T: BitStore>(*const T);
-		impl<T: BitStore> Debug for HexPtr<T> {
-			fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-				write!(f, "0x{:0>1$X}", self.0 as usize, PTR_BITS >> 2)
+		struct Addr<T: BitStore>(Address<T>);
+		impl<T: BitStore> Debug for Addr<T> {
+			fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+				Pointer::fmt(&self.0, fmt)
 			}
 		}
 
-		struct BinAddr<T: BitStore>(BitIdx<T>);
-		impl<T: BitStore> Debug for BinAddr<T> {
-			fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-				write!(f, "0b{:0>1$b}", *self.0, T::INDX as usize)
+		struct Head<M: BitMemory>(BitIdx<M>);
+		impl<M: BitMemory> Debug for Head<M> {
+			fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+				Binary::fmt(&self.0, fmt)
 			}
 		}
 
-		write!(f, "BitPtr<{}>", T::TYPENAME)?;
+		write!(f, "BitPtr<{}>", T::Mem::TYPENAME)?;
 		f.debug_struct("")
-			.field("data", &HexPtr::<T>(self.pointer().r()))
-			.field("head", &BinAddr::<T>(self.head()))
+			.field("data", &Addr(self.pointer()))
+			.field("head", &Head(self.head()))
 			.field("bits", &self.len())
 			.finish()
 	}
+}
+
+impl<T> Copy for BitPtr<T> where T: BitStore
+{
 }
 
 #[cfg(test)]
@@ -975,7 +976,7 @@ mod tests {
 	fn overfull() {
 		BitPtr::<u32>::new(
 			8 as *const u32,
-			1u8.idx(),
+			1u8.idx::<u32>(),
 			BitPtr::<u32>::MAX_BITS + 1,
 		);
 	}

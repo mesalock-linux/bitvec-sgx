@@ -54,12 +54,9 @@ mesalock_sgx = [
 ]
 
 [dependencies]
+funty = "1"
 radium = "0.3"
 sgx_tstd = { rev = "v1.1.0", git = "https://github.com/apache/teaclave-sgx-sdk.git", optional = true }
-
-[dependencies.either]
-default-features = false
-version = "1.5"
 
 [dependencies.serde]
 #default-features = false

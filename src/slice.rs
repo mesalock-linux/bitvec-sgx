@@ -10,8 +10,17 @@ Rust slices, and must never be interchanged except through the provided APIs.
 
 use crate::{
 	access::BitAccess,
-	domain::*,
-	indices::Indexable,
+	domain::{
+		BitDomain,
+		BitDomainMut,
+		Domain,
+		DomainMut,
+	},
+	index::{
+		BitMask,
+		Indexable,
+	},
+	mem::BitMemory,
 	order::{
 		BitOrder,
 		Local,
@@ -22,7 +31,7 @@ use crate::{
 
 use core::marker::PhantomData;
 
-use either::Either;
+use funty::IsInteger;
 
 /** A compact slice of bits, whose order and storage types can be customized.
 
@@ -173,7 +182,7 @@ where
 	/// ```
 	#[inline]
 	pub fn from_element(elt: &T) -> &Self {
-		unsafe { BitPtr::new_unchecked(elt, 0u8.idx(), T::BITS as usize) }
+		unsafe { BitPtr::new_unchecked(elt, 0u8.idx(), T::Mem::BITS as usize) }
 			.into_bitslice()
 	}
 
@@ -200,7 +209,7 @@ where
 	/// ```
 	#[inline]
 	pub fn from_element_mut(elt: &mut T) -> &mut Self {
-		unsafe { BitPtr::new_unchecked(elt, 0u8.idx(), T::BITS as usize) }
+		unsafe { BitPtr::new_unchecked(elt, 0u8.idx(), T::Mem::BITS as usize) }
 			.into_bitslice_mut()
 	}
 
@@ -244,7 +253,7 @@ where
 			len,
 		);
 		let bits = len
-			.checked_mul(T::BITS as usize)
+			.checked_mul(T::Mem::BITS as usize)
 			.expect("Bit length out of range");
 		BitPtr::new(slice.as_ptr(), 0u8.idx(), bits).into_bitslice()
 	}
@@ -478,18 +487,27 @@ where
 	/// Version of [`split_at_mut`](#method.split_at_mut) that does not perform
 	/// boundary checking.
 	///
+	/// # Aliasing
+	///
+	/// Mutable splits mark their returned slices as aliased, as it is permitted
+	/// for the split to occur in the middle of a memory element. To undo this
+	/// aliasing, use `.bit_domain_mut()` on the returned slices.
+	///
 	/// # Safety
 	///
 	/// If `mid` is outside the boundaries of `self`, then this function will
 	/// induce safety violations. The caller must ensure that `mid` is within
 	/// the boundaries of `self` before calling.
 	#[inline]
+	//  `pub type Aliased = BitSlice<O, T::Alias>;` is not allowed in inherents,
+	//  so this will not be aliased.
+	#[allow(clippy::type_complexity)]
 	pub unsafe fn split_at_mut_unchecked(
 		&mut self,
 		mid: usize,
-	) -> (&mut Self, &mut Self)
+	) -> (&mut BitSlice<O, T::Alias>, &mut BitSlice<O, T::Alias>)
 	{
-		let (head, tail) = self.split_at_unchecked(mid);
+		let (head, tail) = self.alias().split_at_unchecked(mid);
 		(
 			head.bitptr().into_bitslice_mut(),
 			tail.bitptr().into_bitslice_mut(),
@@ -540,30 +558,21 @@ where
 	/// assert!(!bits[4 ..].all());
 	/// ```
 	pub fn all(&self) -> bool {
-		match self.bitptr().domain().splat() {
-			Either::Right((h, e, t)) => {
-				let elt = e.load();
-				(*h .. *t).all(|n| elt.get::<O>(n.idx()))
+		match self.domain() {
+			Domain::Enclave { head, elem, tail } => {
+				//  Use the `Mask | M` implementation to bypass the #69441 bug.
+				//  Set dead bits high, then test for low live bits.
+				!O::mask(head, tail) | elem.load() == BitMask::ALL
 			},
-			Either::Left((h, b, t)) => {
-				if let Some((h, head)) = h {
-					let elt = head.load();
-					if !(*h .. T::BITS).all(|n| elt.get::<O>(n.idx())) {
-						return false;
-					}
-				}
-				if let Some(body) = b {
-					if !body.iter().all(|e| e.load() == T::TRUE) {
-						return false;
-					}
-				}
-				if let Some((tail, t)) = t {
-					let elt = tail.load();
-					if !(0 .. *t).all(|n| elt.get::<O>(n.idx())) {
-						return false;
-					}
-				}
-				true
+			Domain::Region { head, body, tail } => {
+				head.map_or(true, |(h, head)| {
+					!O::mask(h, None) | head.load() == BitMask::ALL
+				}) && body
+					.iter()
+					.all(|e| e.get_elem().retype::<T>() == T::Mem::ALL)
+					&& tail.map_or(true, |(tail, t)| {
+						!O::mask(None, t) | tail.load() == BitMask::ALL
+					})
 			},
 		}
 	}
@@ -598,30 +607,19 @@ where
 	/// assert!(!bits[4 ..].any());
 	/// ```
 	pub fn any(&self) -> bool {
-		match self.bitptr().domain().splat() {
-			Either::Right((h, e, t)) => {
-				let elt = e.load();
-				(*h .. *t).any(|n| elt.get::<O>(n.idx()))
+		match self.domain() {
+			Domain::Enclave { head, elem, tail } => {
+				O::mask(head, tail) & elem.load() != BitMask::ZERO
 			},
-			Either::Left((h, b, t)) => {
-				if let Some((h, head)) = h {
-					let elt = head.load();
-					if (*h .. T::BITS).any(|n| elt.get::<O>(n.idx())) {
-						return true;
-					}
-				}
-				if let Some(body) = b {
-					if body.iter().any(|elt| elt.load() != T::FALSE) {
-						return true;
-					}
-				}
-				if let Some((tail, t)) = t {
-					let elt = tail.load();
-					if (0 .. *t).any(|n| elt.get::<O>(n.idx())) {
-						return true;
-					}
-				}
-				false
+			Domain::Region { head, body, tail } => {
+				head.map_or(false, |(h, head)| {
+					O::mask(h, None) & head.load() != BitMask::ZERO
+				}) || body
+					.iter()
+					.any(|e| e.get_elem().retype::<T>() != T::Mem::ZERO)
+					|| tail.map_or(false, |(tail, t)| {
+						O::mask(None, t) & tail.load() != BitMask::ZERO
+					})
 			},
 		}
 	}
@@ -749,31 +747,19 @@ where
 	/// assert_eq!(bits.count_ones(), 10);
 	/// ```
 	pub fn count_ones(&self) -> usize {
-		match self.bitptr().domain().splat() {
-			Either::Right((h, e, t)) => {
-				let elt = e.load();
-				(*h .. *t).filter(|n| elt.get::<O>(n.idx())).count()
+		match self.domain() {
+			Domain::Enclave { head, elem, tail } => {
+				(O::mask(head, tail) & elem.load()).count_ones() as usize
 			},
-			Either::Left((h, b, t)) => {
-				let mut out = 0usize;
-				if let Some((h, head)) = h {
-					let elt = head.load();
-					out += (*h .. T::BITS)
-						.filter(|n| elt.get::<O>(n.idx()))
-						.count();
-				}
-				if let Some(body) = b {
-					out += body
-						.iter()
-						.map(BitAccess::load)
-						.map(T::count_ones)
-						.sum::<usize>();
-				}
-				if let Some((tail, t)) = t {
-					let elt = tail.load();
-					out += (0 .. *t).filter(|n| elt.get::<O>(n.idx())).count();
-				}
-				out
+			Domain::Region { head, body, tail } => {
+				head.map_or(0, |(h, head)| {
+					(O::mask(h, None) & head.load()).count_ones() as usize
+				}) + body
+					.iter()
+					.map(|e| e.get_elem().retype::<T>().count_ones() as usize)
+					.sum::<usize>() + tail.map_or(0, |(tail, t)| {
+					(O::mask(None, t) & tail.load()).count_ones() as usize
+				})
 			},
 		}
 	}
@@ -797,7 +783,21 @@ where
 	/// assert_eq!(bits.count_zeros(), 6);
 	/// ```
 	pub fn count_zeros(&self) -> usize {
-		self.len() - self.count_ones()
+		match self.domain() {
+			Domain::Enclave { head, elem, tail } => {
+				(!O::mask(head, tail) | elem.load()).count_zeros() as usize
+			},
+			Domain::Region { head, body, tail } => {
+				head.map_or(0, |(h, head)| {
+					(!O::mask(h, None) | head.load()).count_zeros() as usize
+				}) + body
+					.iter()
+					.map(|e| e.get_elem().retype::<T>().count_zeros() as usize)
+					.sum::<usize>() + tail.map_or(0, |(tail, t)| {
+					(!O::mask(None, t) | tail.load()).count_zeros() as usize
+				})
+			},
+		}
 	}
 
 	/// Set all bits in the slice to a value.
@@ -822,27 +822,28 @@ where
 	/// assert_eq!(bits.as_ref(), &[0b1010_0100]);
 	/// ```
 	pub fn set_all(&mut self, value: bool) {
-		match self.bitptr().domain().splat() {
-			Either::Right((h, e, t)) => {
-				for n in *h .. *t {
-					e.set::<O>(n.idx(), value);
-				}
+		match self.domain_mut() {
+			DomainMut::Enclave { head, elem, tail } => {
+				let val = elem.load();
+				let mask = O::mask(head, tail);
+				elem.store(*if value { mask | val } else { !mask & val });
 			},
-			Either::Left((h, b, t)) => {
-				if let Some((h, head)) = h {
-					for n in *h .. T::BITS {
-						head.set::<O>(n.idx(), value);
-					}
+			DomainMut::Region { head, body, tail } => {
+				if let Some((h, head)) = head {
+					let val = head.load();
+					let mask = O::mask(h, None);
+					head.store(*if value { mask | val } else { !mask & val });
 				}
-				if let Some(body) = b {
-					for elt in body {
-						elt.store(if value { T::TRUE } else { T::FALSE });
-					}
+				for elem in body {
+					elem.set_elem(
+						if value { T::Mem::ALL } else { T::Mem::ZERO }
+							.retype::<T::NoAlias>(),
+					);
 				}
-				if let Some((tail, t)) = t {
-					for n in 0 .. *t {
-						tail.set::<O>(n.idx(), value);
-					}
+				if let Some((tail, t)) = tail {
+					let val = tail.load();
+					let mask = O::mask(None, t);
+					tail.store(*if value { mask | val } else { !mask & val });
 				}
 			},
 		}
@@ -961,6 +962,31 @@ where
 		c
 	}
 
+	/// Accesses the total backing stoarge of the `BitSlice`, as a slice of its
+	/// aliased elements.
+	///
+	/// Because `BitSlice` is permitted to create aliasing views to memory at
+	/// runtime, this method is required to mark the entire slice as aliased in
+	/// order to include the maybe-aliased edge elements.
+	///
+	/// You should prefer using [`.domain()`] to produce a fine-grained
+	/// view that only aliases when necessary. This method is only appropriate
+	/// when you require a single, contiguous, slice for some API.
+	///
+	/// # Parameters
+	///
+	/// - `&self`
+	///
+	/// # Returns
+	///
+	/// An aliased view of the entire memory region this slice covers, including
+	/// contended edge elements.
+	///
+	/// [`.domain()`]: #method.domain
+	pub fn as_aliased_slice(&self) -> &[T::Alias] {
+		self.bitptr().aliased_slice()
+	}
+
 	/// Accesses the backing storage of the `BitSlice` as a slice of its
 	/// elements.
 	///
@@ -992,13 +1018,10 @@ where
 	/// ```
 	pub fn as_slice(&self) -> &[T] {
 		unsafe {
-			BitAccess::as_slice_mut(match self.bitptr().domain() {
-				BitDomain::Empty | BitDomain::Minor(..) => &[],
-				BitDomain::PartialHead(_, _, body)
-				| BitDomain::PartialTail(body, ..)
-				| BitDomain::Major(_, _, body, ..)
-				| BitDomain::Spanning(body) => body,
-			})
+			&*(match self.domain() {
+				Domain::Enclave { .. } => &[],
+				Domain::Region { body, .. } => body,
+			} as *const [T::NoAlias] as *const [T])
 		}
 	}
 
@@ -1021,20 +1044,41 @@ where
 	/// ```
 	pub fn as_mut_slice(&mut self) -> &mut [T] {
 		unsafe {
-			BitAccess::as_slice_mut(match self.bitptr().domain() {
-				BitDomain::Empty | BitDomain::Minor(..) => &[],
-				BitDomain::PartialHead(_, _, body)
-				| BitDomain::PartialTail(body, ..)
-				| BitDomain::Major(_, _, body, ..)
-				| BitDomain::Spanning(body) => body,
-			})
+			&mut *(match self.domain() {
+				Domain::Enclave { .. } => &[],
+				Domain::Region { body, .. } => body,
+			} as *const [T::NoAlias] as *const [T] as *mut [T])
 		}
 	}
 
-	/// Accesses the underlying store, including contended partial elements.
+	/// Splits the slice into the components of its memory domain.
 	///
-	/// This produces a slice of element wrappers that permit shared mutation,
-	/// rather than a slice of the bare `T` fundamentals.
+	/// This produces a set of read-only aliased and unaliased subslices,
+	/// according to its pointer information. See the `BitDomain` documentation
+	/// for more information about the returned descriptor.
+	pub fn bit_domain(&self) -> BitDomain<O, T> {
+		self.into()
+	}
+
+	/// Splits the slice into the components of its memory domain.
+	///
+	/// This produces a set of writable aliased and unaliased subslices,
+	/// according to its pointer information. See the `BitDomainMut`
+	/// documentation for more information about the returned descriptor.
+	pub fn bit_domain_mut(&mut self) -> BitDomainMut<O, T> {
+		self.into()
+	}
+
+	/// Splits the slice into references to its underlying memory elements.
+	///
+	/// Unlike `.bit_domain()` and `.bit_domain_mut()`, this does not return
+	/// smaller, specialized, `BitSlice` handles, but rather appropriately
+	/// un/aliased references to memory elements.
+	///
+	/// The aliased references allow mutation of these elements. You are
+	/// required to not mutate through these references. This function is not
+	/// marked `unsafe`, but this is a contract you must uphold. Use
+	/// [`.domain_mut()`] for mutation.
 	///
 	/// # Parameters
 	///
@@ -1042,11 +1086,34 @@ where
 	///
 	/// # Returns
 	///
-	/// A slice of all elements under the bit span, including any
-	/// partially-owned edge elements, wrapped in safe shared-mutation types.
-	#[inline]
-	pub fn as_total_slice(&self) -> &[T::Access] {
-		self.bitptr().as_access_slice()
+	/// A read-only descriptor of the memory elements underneath `*self`.
+	///
+	/// [`.domain_mut()`]: #method.domain_mut
+	pub fn domain(&self) -> Domain<T> {
+		self.into()
+	}
+
+	/// Splits the slice into mutable references to its underlying memory
+	/// elements.
+	///
+	/// Like `.domain()`, this returns appropriately un/aliased references to
+	/// memory elements. These references are all writable.
+	///
+	/// The aliased edge references permit modifying memory beyond their bit
+	/// marker. You are required to only mutate the region of these edge
+	/// elements that you currently govern. This function is not marked
+	/// `unsafe`, but this is a contract you must uphold.
+	///
+	/// # Parameters
+	///
+	/// - `&mut self`
+	///
+	/// # Returns
+	///
+	/// A descriptor of the memory elements underneath `*self`, permitting
+	/// mutation.
+	pub fn domain_mut(&mut self) -> DomainMut<T> {
+		self.into()
 	}
 
 	/// Accesses the underlying pointer structure.
@@ -1080,6 +1147,38 @@ where
 	#[inline]
 	pub(crate) unsafe fn copy_unchecked(&mut self, from: usize, to: usize) {
 		self.set_unchecked(to, *self.get_unchecked(from));
+	}
+
+	/// Mark an immutable slice as referring to aliased memory.
+	pub(crate) fn alias(&self) -> &BitSlice<O, T::Alias> {
+		unsafe { &*(self as *const Self as *const BitSlice<O, T::Alias>) }
+	}
+
+	/// Mark a mutable slice as referring to aliased memory.
+	pub(crate) fn alias_mut(&mut self) -> &mut BitSlice<O, T::Alias> {
+		unsafe { &mut *(self as *mut Self as *mut BitSlice<O, T::Alias>) }
+	}
+
+	/// Mark a slice as referring to known-unaliased memory.
+	///
+	/// # Safety
+	///
+	/// This function requires that the unaliasing condition is correct,
+	/// otherwise it will introduce race conditions.
+	pub(crate) unsafe fn noalias(&self) -> &BitSlice<O, T::NoAlias> {
+		&*(self as *const Self as *const BitSlice<O, T::NoAlias>)
+	}
+
+	/// Remove the aliasing marker from a mutable slice.
+	///
+	/// # Safety
+	///
+	/// This may only be done when the slice is known to refer to unaliased
+	/// memory, or when the marker is about to be reäpplied.
+	pub(crate) unsafe fn unalias_mut(
+		this: &mut BitSlice<O, T::Alias>,
+	) -> &mut Self {
+		&mut *(this as *mut BitSlice<O, T::Alias> as *mut Self)
 	}
 }
 

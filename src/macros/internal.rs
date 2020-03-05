@@ -46,7 +46,7 @@ macro_rules! __bits_store_array {
 	//  Reroute `usize` to the correct concrete type, and mark the alias.
 	//  The `@ usz` causes `as usize` to be appended to exprs as needed.
 	($order:tt, usize; $($val:expr),*) => {{
-		const LEN: usize = $crate::store::elts::<usize>(
+		const LEN: usize = $crate::mem::elts::<usize>(
 			$crate::__count!($($val),*),
 		);
 
@@ -269,7 +269,7 @@ macro_rules! __elt_from_bits {
 		$(
 			$crate::store::BitStore::set::<$order>(
 				&mut value,
-				unsafe { $crate::indices::BitIdx::new_unchecked(_idx) },
+				unsafe { $crate::index::BitIdx::new_unchecked(_idx) },
 				$a != 0,
 			);
 			_idx += 1;
@@ -511,13 +511,13 @@ pub const fn u32_from_le_bytes(bytes: [u8; 4]) -> u32 {
 
 #[doc(hidden)]
 pub const fn u64_from_be_bytes(bytes: [u8; 8]) -> u64 {
-	(u32_from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as u64) << 32
-		| u32_from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64
+	(u32_from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64) << 32
+	| (u32_from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as u64)
 }
 
 #[doc(hidden)]
 pub const fn u64_from_le_bytes(bytes: [u8; 8]) -> u64 {
-	(u32_from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64) << 32
+	(u32_from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as u64) << 32
 		| u32_from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64
 }
 

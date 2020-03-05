@@ -17,7 +17,7 @@ used in the `&mut` write reference system, as a good-enough substitute.
 
 use crate::{
 	access::BitAccess,
-	indices::BitIdx,
+	index::BitIdx,
 	order::BitOrder,
 	slice::BitSlice,
 	store::BitStore,
@@ -55,7 +55,7 @@ where
 	/// Typed pointer to the memory element containing the proxied bit.
 	pub(super) data: NonNull<T::Access>,
 	/// Index of the proxied bit inside the targeted memory element.
-	pub(super) head: BitIdx<T>,
+	pub(super) head: BitIdx<T::Mem>,
 	/// A local cache for `Deref` usage.
 	pub(super) bit: bool,
 }

@@ -1,14 +1,22 @@
 //! Reimplementation of the standard library’s `Vec` inherent method API.
 
-use super::*;
-
 use crate::{
+	mem::BitMemory,
 	order::BitOrder,
 	pointer::BitPtr,
+	slice::BitSlice,
 	store::BitStore,
+	vec::{
+		iter::{
+			Drain,
+			Splice,
+		},
+		BitVec,
+	},
 };
 
 use alloc::{
+	borrow::ToOwned,
 	boxed::Box,
 	vec::Vec,
 };
@@ -16,9 +24,13 @@ use alloc::{
 use core::{
 	cmp,
 	hint::unreachable_unchecked,
+	marker::PhantomData,
+	mem,
 	ops::RangeBounds,
 	ptr::NonNull,
 };
+
+use funty::IsInteger;
 
 impl<O, T> BitVec<O, T>
 where
@@ -52,7 +64,7 @@ where
 	pub fn with_capacity(capacity: usize) -> Self {
 		//  Get the number of `T` elements needed to store the requested bit
 		//  capacity.
-		let (elts, _) = 0u8.idx::<T>().span(capacity);
+		let elts = T::Mem::elts(capacity);
 		//  Allocate a buffer that can hold that many elements.
 		let v = Vec::with_capacity(elts);
 		let (ptr, cap) = (v.as_ptr(), v.capacity());
@@ -76,7 +88,7 @@ where
 	#[inline]
 	pub fn capacity(&self) -> usize {
 		self.capacity
-			.checked_mul(T::BITS as usize)
+			.checked_mul(T::Mem::BITS as usize)
 			.expect("Vector capacity overflow")
 	}
 
@@ -484,8 +496,8 @@ where
 		);
 		//  If self is empty *or* tail is at the back edge of an element, push
 		//  an element onto the vector.
-		if self.is_empty() || *self.pointer.tail() == T::BITS {
-			self.with_vec(|v| v.push(T::FALSE));
+		if self.is_empty() || *self.pointer.tail() == T::Mem::BITS {
+			self.with_vec(|v| v.push(T::Mem::ZERO.into()));
 		}
 		//  At this point, it is always safe to increment the tail, and then
 		//  write to the newly live bit.
@@ -694,9 +706,9 @@ where
 	/// let mut bv = bitvec![];
 	/// let mut p = 1;
 	/// bv.resize_with(4, || {
-	/// 	p += 1;
-	/// 	p % 2 == 0
-	/// 	});
+	///   p += 1;
+	///   p % 2 == 0
+	/// });
 	/// assert_eq!(bv, bitvec![1, 0, 1, 0]);
 	/// ```
 	///

@@ -12,7 +12,8 @@ slice and vector types.
 use crate::{
 	access::BitAccess,
 	boxed::BitBox,
-	indices::Indexable,
+	index::Indexable,
+	mem::BitMemory,
 	order::{
 		BitOrder,
 		Local,
@@ -22,15 +23,15 @@ use crate::{
 	store::BitStore,
 };
 
-use alloc::{
-	borrow::ToOwned,
-	vec::Vec,
-};
+use alloc::vec::Vec;
 
 use core::{
 	marker::PhantomData,
 	mem,
+	ptr,
 };
+
+use funty::IsInteger;
 
 /** A compact [`Vec`] of bits, whose order and storage type can be customized.
 
@@ -136,7 +137,7 @@ a bit slice, use `&`. Example:
 ```rust
 use bitvec::prelude::*;
 fn read_bitslice(slice: &BitSlice) {
-	// use slice
+  // use slice
 }
 
 let bv = bitvec![0, 1];
@@ -282,7 +283,7 @@ where
 		unsafe {
 			out.set_len(len);
 		}
-		out.set_elements(if bit { T::TRUE } else { T::FALSE });
+		out.set_elements(if bit { T::Mem::ALL } else { T::Mem::ZERO }.into());
 		out
 	}
 
@@ -339,7 +340,13 @@ where
 	/// ```
 	#[inline]
 	pub fn from_slice(slice: &[T]) -> Self {
-		Self::from_vec(slice.to_owned())
+		let mut buf = Vec::with_capacity(slice.len());
+		buf.extend(slice.iter().map(|elt| {
+			unsafe { &*(elt as *const T as *const T::Access) }
+				.load()
+				.into()
+		}));
+		Self::from_vec(buf)
 	}
 
 	/// Consumes a `Vec<T>` and creates a `BitVec<C, T>` from it.
@@ -608,7 +615,7 @@ where
 	pub fn set_elements(&mut self, element: T) {
 		self.as_mut_slice()
 			.iter_mut()
-			.for_each(|elt| *elt = element);
+			.for_each(|elt| *elt = unsafe { ptr::read(&element) });
 	}
 
 	/// Performs “reverse” addition (left to right instead of right to left).

@@ -8,43 +8,35 @@ handle operations.
 !*/
 
 use crate::{
-	indices::{
+	index::{
 		BitIdx,
 		BitTail,
 	},
-	pointer::BitPtr,
+	mem::BitMemory,
+	order::BitOrder,
+	slice::BitSlice,
 	store::BitStore,
 };
 
-use either::Either;
-
-/** Alias for the region components produced by the `BitDomain::splat` method.
-
-Splatting a domain will produce either a `(head, element, tail)` tuple when the
-region is contained entirely within a single element, or a much more complex
-tuple of the head partial element, the body whole elements, and the tail partial
-element.
-
-# Types
-
-- `T`: The backing storage the splat is describing.
-
-# Lifetimes
-
-- `'a`: The backing storage the splat is describing.
-**/
-//  Type bounds in `type` aliases are disallowed, so `T::Access` is not writable
-//  here.
-pub(crate) type Splat<'a, T, A> = Either<
-	(
-		Option<(BitIdx<T>, &'a A)>,
-		Option<&'a [A]>,
-		Option<(&'a A, BitTail<T>)>,
-	),
-	(BitIdx<T>, &'a A, BitTail<T>),
->;
+use core::{
+	cell::UnsafeCell,
+	fmt::{
+		self,
+		Binary,
+		Debug,
+		Formatter,
+		LowerHex,
+		Octal,
+		UpperHex,
+	},
+	iter::FusedIterator,
+};
 
 /** Representations of the state of the bit domain in its containing elements.
+
+`BitSlice` regions can be described in terms of maybe-aliased and
+known-unaliased sub-regions. This type produces correctly-marked subslices of a
+source slice, according to information contained in its pointer.
 
 # Lifetimes
 
@@ -52,270 +44,700 @@ pub(crate) type Splat<'a, T, A> = Either<
 
 # Type Parameters
 
-- `T: BitStore` The type of the elements the domain inhabits.
+- `O`: The ordering type of the parent `BitSlice`.
+- `T`: The storage type of the parent `BitSlice`.
 **/
 #[derive(Debug)]
-pub(crate) enum BitDomain<'a, T>
-where T: 'a + BitStore
+pub enum BitDomain<'a, O, T>
+where
+	O: BitOrder,
+	T: 'a + BitStore,
 {
-	/// Empty domain.
-	Empty,
-	/// Single element domain which does not reach either edge.
-	///
-	/// # Members
-	///
-	/// - `.0`: index of the first live domain bit in the element
-	/// - `.1`: mutable reference to the element contatining the domain
-	/// - `.2`: index of the first dead bit after the domain
-	///
-	/// # Behavior
-	///
-	/// This variant is produced when the domain is contained entirely inside
-	/// one element, and does not reach to either edge.
-	Minor(BitIdx<T>, &'a T::Access, BitTail<T>),
-	/// Multpile element domain which does not reach the edge of its edge
-	/// elements.
-	///
-	/// # Members
-	///
-	/// - `.0`: index of the first live domain bit in the first element
-	/// - `.1`: mutable reference to the partial head edge element
-	/// - `.2`: mutable slice handle to the fully-live elements in the interior.
-	///   This may be empty.
-	/// - `.3`: mutable reference to the partial tail edge element
-	/// - `.4`: index of the first dead bit after the domain
-	///
-	/// # Behavior
-	///
-	/// This variant is produced when the domain uses at least two elements,
-	/// and reaches neither the head edge of the head element nor the tail edge
-	/// of the tail element.
-	Major(
-		BitIdx<T>,
-		&'a T::Access,
-		&'a [T::Access],
-		&'a T::Access,
-		BitTail<T>,
-	),
-	/// Domain with a partial head cursor and fully extended tail cursor.
-	///
-	/// # Members
-	///
-	/// - `.0`: index of the first live bit in the head element
-	/// - `.1`: mutable reference to the partial head element
-	/// - `.2`: mutable reference to the full elements of the domain. This may
-	///   be empty.
-	///
-	/// # Behavior
-	///
-	/// This variant is produced when the domain’s head cursor is past `0`, and
-	/// its tail cursor is exactly `T::BITS`.
-	PartialHead(BitIdx<T>, &'a T::Access, &'a [T::Access]),
-	/// Domain with a fully extended head cursor and partial tail cursor.
-	///
-	/// # Members
-	///
-	/// - `.0`: mutable reference to the full elements of the domain. This may
-	///   be empty.
-	/// - `.1`: mutable reference to the partial tail element
-	/// - `.2`: index of the first dead bit after the live bits in the tail
-	///
-	/// # Behavior
-	///
-	/// This variant is produced when the domain’s head cursor is exactly `0`,
-	/// and its tail cursor is less than `T::BITS`.
-	PartialTail(&'a [T::Access], &'a T::Access, BitTail<T>),
-	/// Domain which fully spans its containing elements.
-	///
-	/// # Members
-	///
-	/// - `.0`: mutable slice handle to the elements containing the domain
-	///
-	/// # Behavior
-	///
-	/// This variant is produced when the all elements in the domain are fully
-	/// populated.
-	Spanning(&'a [T::Access]),
+	/// A `BitSlice` region contained entirely within the interior of one
+	/// element.
+	Enclave {
+		/// The index at which the slice region begins.
+		head: BitIdx<T::Mem>,
+		/// The original slice, marked as aliased.
+		body: &'a BitSlice<O, T::Alias>,
+		/// The index at which the slice region ends.
+		tail: BitTail<T::Mem>,
+	},
+	/// A `BitSlice` region that touches at least one element edge.
+	Region {
+		/// The subslice that partially-fills the lowest element in the region.
+		head: &'a BitSlice<O, T::Alias>,
+		/// The subslice that wholly-fills elements, precluding any other handle
+		/// from aliasing them.
+		body: &'a BitSlice<O, T::NoAlias>,
+		/// The subslice that partially-fills the highest element in the region.
+		tail: &'a BitSlice<O, T::Alias>,
+	},
 }
 
-impl<'a, T> BitDomain<'a, T>
-where T: BitStore
+impl<'a, O, T> BitDomain<'a, O, T>
+where
+	O: BitOrder,
+	T: 'a + BitStore,
 {
-	/// Unpacks a domain into components.
-	///
-	/// This is useful for deduplicating code that uses each region component
-	/// but does not otherwise branch on region kind.
+	/// Constructs a domain over an empty slice.
 	///
 	/// # Returns
 	///
-	/// The `Minor` case returns a tuple of the head index, the element, and the
-	/// tail index; all other cases return a tuple of optional:
+	/// A `BitDomain::Region` with all subslices set to the empty slice.
+	fn empty() -> Self {
+		BitDomain::Region {
+			head: BitSlice::empty(),
+			body: BitSlice::empty(),
+			tail: BitSlice::empty(),
+		}
+	}
+
+	/// Constructs a domain with partial elements on both edges.
 	///
-	/// - head element, and start index in that element
-	/// - body slice
-	/// - tail element, and end index in that element
-	pub(crate) fn splat(self) -> Splat<'a, T, T::Access> {
-		match self {
-			BitDomain::Empty => Either::Left((None, None, None)),
-			BitDomain::Minor(h, e, t) => Either::Right((h, e, t)),
-			BitDomain::Major(h, head, body, tail, t) => {
-				Either::Left((Some((h, head)), Some(body), Some((tail, t))))
+	/// # Parameters
+	///
+	/// - `head`: The element index at which the slice begins.
+	/// - `slice`: The original `BitSlice` being split.
+	/// - `tail`: The element index at which the slice ends.
+	///
+	/// # Returns
+	///
+	/// A `BitDomain::Region` with its `head` section set to the live bits in
+	/// the low element, its `body` section set to the live bits in the
+	/// wholly-filled interior elements, and its `tail` section set to the live
+	/// bits in the high element.
+	fn major(
+		head: BitIdx<T::Mem>,
+		slice: &BitSlice<O, T>,
+		tail: BitTail<T::Mem>,
+	) -> Self
+	{
+		unsafe {
+			let (head, rest) =
+				slice.split_at_unchecked((T::Mem::BITS - *head) as usize);
+			let (body, tail) =
+				rest.split_at_unchecked(rest.len() - (*tail as usize));
+			BitDomain::Region {
+				head: &*(head as *const BitSlice<O, T>
+					as *const BitSlice<O, T::Alias>),
+				body: &*(body as *const BitSlice<O, T>
+					as *const BitSlice<O, T::NoAlias>),
+				tail: &*(tail as *const BitSlice<O, T>
+					as *const BitSlice<O, T::Alias>),
+			}
+		}
+	}
+
+	/// Constructs a domain wholly within a single element.
+	///
+	/// # Parameters
+	///
+	/// - `head`: The element index at which the slice begins.
+	/// - `slice`: The source slice.
+	/// - `tail`: The element index at which the slice ends.
+	///
+	/// # Returns
+	///
+	/// A `BitDomain::Enclave` that marks the source slice as aliased, and
+	/// carries the `head` and `tail` indices for mask construction.
+	fn minor(
+		head: BitIdx<T::Mem>,
+		slice: &BitSlice<O, T>,
+		tail: BitTail<T::Mem>,
+	) -> Self
+	{
+		BitDomain::Enclave {
+			head,
+			body: unsafe {
+				&*(slice as *const BitSlice<O, T>
+					as *const BitSlice<O, T::Alias>)
 			},
-			BitDomain::PartialHead(h, head, body) => {
-				Either::Left((Some((h, head)), Some(body), None))
+			tail,
+		}
+	}
+
+	fn partial_head(head: BitIdx<T::Mem>, slice: &BitSlice<O, T>) -> Self {
+		unsafe {
+			let (head, rest) =
+				slice.split_at_unchecked((T::Mem::BITS - *head) as usize);
+			BitDomain::Region {
+				head: &*(head as *const BitSlice<O, T>
+					as *const BitSlice<O, T::Alias>),
+				body: &*(rest as *const BitSlice<O, T>
+					as *const BitSlice<O, T::NoAlias>),
+				tail: BitSlice::empty(),
+			}
+		}
+	}
+
+	fn partial_tail(slice: &BitSlice<O, T>, tail: BitTail<T::Mem>) -> Self {
+		unsafe {
+			let (rest, tail) =
+				slice.split_at_unchecked(slice.len() - (*tail as usize));
+			BitDomain::Region {
+				head: BitSlice::empty(),
+				body: &*(rest as *const BitSlice<O, T>
+					as *const BitSlice<O, T::NoAlias>),
+				tail: &*(tail as *const BitSlice<O, T>
+					as *const BitSlice<O, T::Alias>),
+			}
+		}
+	}
+
+	fn spanning(slice: &'a BitSlice<O, T>) -> Self {
+		BitDomain::Region {
+			head: BitSlice::empty(),
+			body: unsafe {
+				&*(slice as *const BitSlice<O, T>
+					as *const BitSlice<O, T::NoAlias>)
 			},
-			BitDomain::PartialTail(body, tail, t) => {
-				Either::Left((None, Some(body), Some((tail, t))))
-			},
-			BitDomain::Spanning(body) => Either::Left((None, Some(body), None)),
-		}
-	}
-
-	/// Tests if the variant is `Minor`.
-	#[cfg(test)]
-	pub(crate) fn is_minor(&self) -> bool {
-		match self {
-			BitDomain::Minor(..) => true,
-			_ => false,
-		}
-	}
-
-	/// Tests if the variant is `Major`.
-	#[cfg(test)]
-	pub(crate) fn is_major(&self) -> bool {
-		match self {
-			BitDomain::Major(..) => true,
-			_ => false,
-		}
-	}
-
-	/// Tests if the variant is `PartialHead`.
-	#[cfg(test)]
-	pub(crate) fn is_partial_head(&self) -> bool {
-		match self {
-			BitDomain::PartialHead(..) => true,
-			_ => false,
-		}
-	}
-
-	/// Tests if the variant is `PartialTail`.
-	#[cfg(test)]
-	pub(crate) fn is_partial_tail(&self) -> bool {
-		match self {
-			BitDomain::PartialTail(..) => true,
-			_ => false,
-		}
-	}
-
-	/// Tests if the variant is `Spanning`.
-	pub(crate) fn is_spanning(&self) -> bool {
-		match self {
-			BitDomain::Spanning(..) => true,
-			_ => false,
+			tail: BitSlice::empty(),
 		}
 	}
 }
 
-impl<'a, T> From<BitPtr<T>> for BitDomain<'a, T>
-where T: 'a + BitStore
+impl<'a, O, T> From<&'a BitSlice<O, T>> for BitDomain<'a, O, T>
+where
+	O: BitOrder,
+	T: 'a + BitStore,
 {
-	fn from(bitptr: BitPtr<T>) -> Self {
+	fn from(this: &'a BitSlice<O, T>) -> Self {
+		let bitptr = this.bitptr();
 		let h = bitptr.head();
 		let (e, t) = h.span(bitptr.len());
-		let w = T::BITS;
-		let data = bitptr.as_access_slice();
+		let w = T::Mem::BITS;
 
 		match (*h, e, *t) {
 			//  Empty.
-			(_, 0, _) => BitDomain::Empty,
+			(_, 0, _) => Self::empty(),
 			//  Reaches both edges, for any number of elements.
-			(0, _, t) if t == w => BitDomain::Spanning(data),
+			(0, _, t) if t == w => Self::spanning(this),
 			//  Reaches only the tail edge, for any number of elements.
-			(_, _, t) if t == w => {
-				let (head, rest) = data
-					.split_first()
-					.expect("PartialHead cannot fail to split");
-				BitDomain::PartialHead(h, head, rest)
-			},
+			(_, _, t) if t == w => Self::partial_head(h, this),
 			//  Reaches only the head edge, for any number of elements.
-			(0, ..) => {
-				let (tail, rest) =
-					data.split_last().expect("PartialTail cannot fail to split");
-				BitDomain::PartialTail(rest, tail, t)
-			},
+			(0, ..) => Self::partial_tail(this, t),
 			//  Reaches neither edge, for only one element.
-			(_, 1, _) => BitDomain::Minor(h, &data[0], t),
+			(_, 1, _) => Self::minor(h, this, t),
 			//  Reaches neither edge, for multiple elements.
-			(..) => {
-				let (head, body) = data
-					.split_first()
-					.expect("Major cannot fail to split the head element");
-				let (tail, body) = body
-					.split_last()
-					.expect("Major cannot fail to split the tail element");
-				BitDomain::Major(h, head, body, tail, t)
+			(..) => Self::major(h, this, t),
+		}
+	}
+}
+
+/** Writable version of [`BitDomain`].
+
+[`BitDomain`]: enum.BitDomain.html
+**/
+pub enum BitDomainMut<'a, O, T>
+where
+	O: BitOrder,
+	T: 'a + BitStore,
+{
+	/// Writable version of [`BitDomain::Enclave`].
+	///
+	/// [`BitDomain::Enclave`]: enum.BitDomain.html#variant.Enclave
+	Enclave {
+		/// See `BitDomain::Enclave`.
+		head: BitIdx<T::Mem>,
+		/// See `BitDomain::Enclave`.
+		body: &'a mut BitSlice<O, T::Alias>,
+		/// See `BitDomain::Enclave`.
+		tail: BitTail<T::Mem>,
+	},
+	/// Writable version of [`BitDomain::Region`].
+	///
+	/// [`BitDomain::Region`]: enum.BitDomain.html#variant.Region
+	Region {
+		/// See `BitDomain::Region`.
+		head: &'a mut BitSlice<O, T::Alias>,
+		/// See `BitDomain::Region`.
+		body: &'a mut BitSlice<O, T::NoAlias>,
+		/// See `BitDomain::Region`.
+		tail: &'a mut BitSlice<O, T::Alias>,
+	},
+}
+
+impl<'a, O, T> From<&'a mut BitSlice<O, T>> for BitDomainMut<'a, O, T>
+where
+	O: BitOrder,
+	T: 'a + BitStore,
+{
+	fn from(this: &'a mut BitSlice<O, T>) -> Self {
+		match (&*this).into() {
+			BitDomain::Enclave { head, body, tail } => BitDomainMut::Enclave {
+				head,
+				body: body.bitptr().into_bitslice_mut(),
+				tail,
+			},
+			BitDomain::Region { head, body, tail } => BitDomainMut::Region {
+				head: head.bitptr().into_bitslice_mut(),
+				body: body.bitptr().into_bitslice_mut(),
+				tail: tail.bitptr().into_bitslice_mut(),
 			},
 		}
 	}
 }
 
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use crate::indices::Indexable;
+/** Representations of the raw memory domain for a `BitSlice`.
 
-	#[test]
-	fn minor() {
-		let data: u8 = 0u8;
-		let bp = BitPtr::new(&data, 1u8.idx(), 6);
+This structure is produced by [`BitSlice::domain`], and describes the region of
+memory the `BitSlice` covers in terms of its raw memory elements, rather than
+its bits.
 
-		assert!(bp.domain().is_minor());
+The aliased references contained in this structure permit the mutation of memory
+observed by other immutable `&BitSlice` handles. You are responsible for
+maintaining memory correctness by not using mutating methods on these
+references.
+
+# `[T::Mem]` replacement
+
+As it is unsafe to produce a reference to raw memory, due to runtime alias
+conditions, this type also functions as a replacement for a slice view of the
+backing memory. It is capable of iterating over the values of the memory store,
+and implements the [`core::fmt`] traits to render the backing store.
+
+[`BitSlice::domain`]: ../slice/struct.BitSlice.html#method.domain
+[`core::fmt`]: //doc.rust-lang.org/corce/fmt
+**/
+pub enum Domain<'a, T>
+where T: 'a + BitStore
+{
+	/// The source `BitSlice` region is in the interior of one element.
+	Enclave {
+		/// Index, according to the `BitSlice`’s `BitOrder` parameter, at which
+		/// the slice begins.
+		head: BitIdx<T::Mem>,
+		/// The memory address of the element containing the `BitSlice`.
+		elem: &'a T::Alias,
+		/// Index, according to the `BitSlice`’s `BitOrder` parameter, at which
+		/// the slice ends.
+		tail: BitTail<T::Mem>,
+	},
+	/// The source `BitSlice` region touches at least one edge of an element.
+	Region {
+		/// If the first element is partially-filled, its address and starting
+		/// bit index according to the `BitOrder` parameter.
+		head: Option<(BitIdx<T::Mem>, &'a T::Alias)>,
+		/// Any fully-spanned elements in the source `BitSlice`.
+		body: &'a [T::NoAlias],
+		/// If the last element is partially-filled, its address and ending bit
+		/// index according to the `BitOrder` parameter.
+		tail: Option<(&'a T::Alias, BitTail<T::Mem>)>,
+	},
+}
+
+impl<'a, T> Domain<'a, T>
+where T: 'a + BitStore
+{
+	/// Produces an iterator over each memory value referenced by the domain.
+	///
+	/// This iterator will perform the appropriate load on each reference
+	/// element, yielding the value of the referenced memory.
+	///
+	/// # Parameters
+	///
+	/// - `&self`
+	///
+	/// # Returns
+	///
+	/// An iterator yielding each referent value.
+	pub fn iter(&self) -> DomainIter<'a, T> {
+		DomainIter { domain: *self }
 	}
 
-	#[test]
-	fn major() {
-		let data: &[u16] = &[0u16, !0u16];
-		let bp = BitPtr::new(&data[0], 1u8.idx(), 28);
-
-		assert!(bp.domain().is_major());
+	pub(crate) fn is_spanning(&self) -> bool {
+		match self {
+			Domain::Region {
+				head: None,
+				tail: None,
+				..
+			} => true,
+			_ => false,
+		}
 	}
 
-	#[test]
-	fn partial_head() {
-		let data: u32 = 0u32;
-		let bp = BitPtr::new(&data, 4u8.idx(), 28);
-
-		assert!(bp.domain().is_partial_head());
-
-		let data: &[u32] = &[0u32, !0u32];
-		let bp = BitPtr::new(&data[0], 4u8.idx(), 60);
-
-		assert!(bp.domain().is_partial_head());
+	fn empty() -> Self {
+		Domain::Region {
+			head: None,
+			body: &[],
+			tail: None,
+		}
 	}
 
-	#[test]
-	fn partial_tail() {
-		let data: u32 = 0u32;
-		let bp = BitPtr::new(&data, 0u8.idx(), 60);
-
-		assert!(bp.domain().is_partial_tail());
-
-		let data: &[u32] = &[0u32, !0u32];
-		let bp = BitPtr::new(&data[0], 0u8.idx(), 60);
-
-		assert!(bp.domain().is_partial_tail());
+	fn major(
+		head: BitIdx<T::Mem>,
+		elts: &'a [T::Alias],
+		tail: BitTail<T::Mem>,
+	) -> Self
+	{
+		let (first, rest) = elts
+			.split_first()
+			.unwrap_or_else(|| unsafe { core::hint::unreachable_unchecked() });
+		let (last, body) = rest
+			.split_last()
+			.unwrap_or_else(|| unsafe { core::hint::unreachable_unchecked() });
+		Domain::Region {
+			head: Some((head, first)),
+			body: unsafe {
+				&*(body as *const [T::Alias] as *const [T::NoAlias])
+			},
+			tail: Some((last, tail)),
+		}
 	}
 
-	#[test]
-	fn spanning() {
-		let data: u8 = 0u8;
-		let bp = BitPtr::new(&data, 0u8.idx(), 8);
+	fn minor(
+		head: BitIdx<T::Mem>,
+		elts: &'a [T::Alias],
+		tail: BitTail<T::Mem>,
+	) -> Self
+	{
+		Domain::Enclave {
+			head,
+			elem: unsafe { elts.get_unchecked(0) },
+			tail,
+		}
+	}
 
-		assert!(bp.domain().is_spanning());
+	fn partial_head(head: BitIdx<T::Mem>, elts: &'a [T::Alias]) -> Self {
+		let (first, rest) = elts
+			.split_first()
+			.unwrap_or_else(|| unsafe { core::hint::unreachable_unchecked() });
+		Domain::Region {
+			head: Some((head, first)),
+			body: unsafe {
+				&*(rest as *const [T::Alias] as *const [T::NoAlias])
+			},
+			tail: None,
+		}
+	}
 
-		let data: &[u16] = &[0u16, !0u16];
-		let bp = BitPtr::new(&data[0], 0u8.idx(), 32);
+	fn partial_tail(elts: &'a [T::Alias], tail: BitTail<T::Mem>) -> Self {
+		let (last, rest) = elts
+			.split_last()
+			.unwrap_or_else(|| unsafe { core::hint::unreachable_unchecked() });
+		Domain::Region {
+			head: None,
+			body: unsafe {
+				&*(rest as *const [T::Alias] as *const [T::NoAlias])
+			},
+			tail: Some((last, tail)),
+		}
+	}
 
-		assert!(bp.domain().is_spanning());
+	fn spanning(elts: &[T::Alias]) -> Self {
+		Domain::Region {
+			head: None,
+			body: unsafe {
+				&*(elts as *const [T::Alias] as *const [T::NoAlias])
+			},
+			tail: None,
+		}
+	}
+}
+
+impl<T> Clone for Domain<'_, T>
+where T: BitStore
+{
+	fn clone(&self) -> Self {
+		match self {
+			Domain::Enclave { head, elem, tail } => Domain::Enclave {
+				head: *head,
+				elem,
+				tail: *tail,
+			},
+			Domain::Region { head, body, tail } => Domain::Region {
+				head: *head,
+				body,
+				tail: *tail,
+			},
+		}
+	}
+}
+
+impl<'a, O, T> From<&'a BitSlice<O, T>> for Domain<'a, T>
+where
+	O: BitOrder,
+	T: 'a + BitStore,
+{
+	fn from(this: &'a BitSlice<O, T>) -> Self {
+		let bitptr = this.bitptr();
+		let h = bitptr.head();
+		let (e, t) = h.span(bitptr.len());
+		let w = T::Mem::BITS;
+		let elts = bitptr.aliased_slice();
+
+		match (*h, e, *t) {
+			//  Empty.
+			(_, 0, _) => Self::empty(),
+			//  Reaches both edges, for any number of elements.
+			(0, _, t) if t == w => Self::spanning(elts),
+			//  Reaches only the tail edge, for any number of elements.
+			(_, _, t) if t == w => Self::partial_head(h, elts),
+			//  Reaches only the head edge, for any number of elements.
+			(0, ..) => Self::partial_tail(elts, t),
+			//  Reaches neither edge, for only one element.
+			(_, 1, _) => Self::minor(h, elts, t),
+			//  Reaches neither edge, for multiple elements.
+			(..) => Self::major(h, elts, t),
+		}
+	}
+}
+
+impl<T> Default for Domain<'_, T>
+where T: BitStore
+{
+	fn default() -> Self {
+		Self::empty()
+	}
+}
+
+impl<T> Binary for Domain<'_, T>
+where
+	T: BitStore,
+	T::Mem: Binary,
+{
+	fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+		struct BinVal<M: BitMemory>(M);
+		impl<M: BitMemory> Debug for BinVal<M> {
+			fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+				Binary::fmt(&self.0, fmt)
+			}
+		}
+
+		fmt.debug_list().entries(self.iter().map(BinVal)).finish()
+	}
+}
+
+impl<T> Debug for Domain<'_, T>
+where
+	T: BitStore,
+	T::Mem: Debug,
+{
+	fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+		fmt.debug_list().entries(self.iter()).finish()
+	}
+}
+
+impl<T> LowerHex for Domain<'_, T>
+where
+	T: BitStore,
+	T::Mem: LowerHex,
+{
+	fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+		struct HexVal<M: BitMemory>(M);
+		impl<M: BitMemory> Debug for HexVal<M> {
+			fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+				LowerHex::fmt(&self.0, fmt)
+			}
+		}
+
+		fmt.debug_list().entries(self.iter().map(HexVal)).finish()
+	}
+}
+
+impl<T> Octal for Domain<'_, T>
+where
+	T: BitStore,
+	T::Mem: Octal,
+{
+	fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+		struct OctVal<M: BitMemory>(M);
+		impl<M: BitMemory> Debug for OctVal<M> {
+			fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+				Octal::fmt(&self.0, fmt)
+			}
+		}
+
+		fmt.debug_list().entries(self.iter().map(OctVal)).finish()
+	}
+}
+
+impl<T> UpperHex for Domain<'_, T>
+where
+	T: BitStore,
+	T::Mem: UpperHex,
+{
+	fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+		struct HexVal<M: BitMemory>(M);
+		impl<M: BitMemory> Debug for HexVal<M> {
+			fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+				UpperHex::fmt(&self.0, fmt)
+			}
+		}
+
+		fmt.debug_list().entries(self.iter().map(HexVal)).finish()
+	}
+}
+
+impl<'a, T> IntoIterator for Domain<'a, T>
+where T: 'a + BitStore
+{
+	type IntoIter = DomainIter<'a, T>;
+	type Item = <Self::IntoIter as Iterator>::Item;
+
+	fn into_iter(self) -> Self::IntoIter {
+		DomainIter { domain: self }
+	}
+}
+
+impl<T> Copy for Domain<'_, T> where T: BitStore
+{
+}
+
+/** Writable version of [`Domain`].
+
+[`Domain`]: enum.Domain.html
+**/
+pub enum DomainMut<'a, T>
+where T: 'a + BitStore
+{
+	/// Writable version of [`Domain::Enclave`].
+	///
+	/// [`Domain::Enclave`]: enum.Domain.html#variant.Enclave
+	Enclave {
+		/// See `Domain::Enclave`.
+		head: BitIdx<T::Mem>,
+		/// See `Domain::Enclave`.
+		elem: &'a T::Alias,
+		/// See `Domain::Enclave`.
+		tail: BitTail<T::Mem>,
+	},
+	/// Writable version of [`Domain::Region`].
+	///
+	/// [`Domain::Region`]: enum.Domain.html#variant.Region
+	Region {
+		/// See `Domain::Region`.
+		head: Option<(BitIdx<T::Mem>, &'a T::Alias)>,
+		/// See `Domain::Region`.
+		body: &'a mut [T::NoAlias],
+		/// See `Domain::Region`.
+		tail: Option<(&'a T::Alias, BitTail<T::Mem>)>,
+	},
+}
+
+impl<'a, O, T> From<&'a mut BitSlice<O, T>> for DomainMut<'a, T>
+where
+	O: BitOrder,
+	T: 'a + BitStore,
+{
+	fn from(this: &'a mut BitSlice<O, T>) -> Self {
+		match this.domain() {
+			Domain::Enclave { head, elem, tail } => DomainMut::Enclave {
+				head,
+				elem: unsafe {
+					&mut *(&*(elem as *const T::Alias
+						as *const UnsafeCell<T::Alias>))
+						.get()
+				},
+				tail,
+			},
+			Domain::Region { head, body, tail } => DomainMut::Region {
+				head,
+				body: unsafe {
+					&mut *(&*(body as *const [T::NoAlias]
+						as *const UnsafeCell<[T::NoAlias]>))
+						.get()
+				},
+				tail,
+			},
+		}
+	}
+}
+
+/// Element iterator for a `Domain`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DomainIter<'a, T>
+where T: 'a + BitStore
+{
+	domain: Domain<'a, T>,
+}
+
+impl<'a, T> Iterator for DomainIter<'a, T>
+where T: 'a + BitStore
+{
+	type Item = T::Mem;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		match self.domain {
+			Domain::Enclave { elem, .. } => {
+				let out = elem.get_elem().retype::<T>();
+				self.domain = Domain::empty();
+				Some(out)
+			},
+			Domain::Region {
+				ref mut head,
+				ref mut body,
+				ref mut tail,
+			} => {
+				if let Some((_, h)) = head {
+					let out = h.get_elem().retype::<T>();
+					*head = None;
+					return Some(out);
+				}
+				if let Some((out, rest)) = body.split_first() {
+					*body = rest;
+					return Some(out.get_elem().retype::<T>());
+				}
+				if let Some((t, _)) = tail {
+					let out = t.get_elem().retype::<T>();
+					*tail = None;
+					return Some(out);
+				}
+				None
+			},
+		}
+	}
+}
+
+impl<T> ExactSizeIterator for DomainIter<'_, T>
+where T: BitStore
+{
+	fn len(&self) -> usize {
+		match self.domain {
+			Domain::Enclave { .. } => 1,
+			Domain::Region { head, body, tail } => {
+				head.is_some() as usize + body.len() + tail.is_some() as usize
+			},
+		}
+	}
+}
+
+impl<T> FusedIterator for DomainIter<'_, T> where T: BitStore
+{
+}
+
+impl<'a, T> DoubleEndedIterator for DomainIter<'a, T>
+where T: 'a + BitStore
+{
+	fn next_back(&mut self) -> Option<Self::Item> {
+		match self.domain {
+			Domain::Enclave { elem, .. } => {
+				let out = elem.get_elem().retype::<T>();
+				self.domain = Domain::empty();
+				Some(out)
+			},
+			Domain::Region {
+				ref mut head,
+				ref mut body,
+				ref mut tail,
+			} => {
+				if let Some((t, _)) = tail {
+					let out = t.get_elem().retype::<T>();
+					*tail = None;
+					return Some(out);
+				}
+				if let Some((out, rest)) = body.split_last() {
+					*body = rest;
+					return Some(out.get_elem().retype::<T>());
+				}
+				if let Some((_, h)) = head {
+					let out = h.get_elem().retype::<T>();
+					*head = None;
+					return Some(out);
+				}
+				None
+			},
+		}
 	}
 }

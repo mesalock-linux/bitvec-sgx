@@ -4,13 +4,12 @@ use super::api::BitSliceIndex;
 
 use crate::{
 	access::BitAccess,
-	indices::Indexable,
+	domain::DomainMut,
+	mem::BitMemory,
 	order::BitOrder,
 	slice::BitSlice,
 	store::BitStore,
 };
-
-use either::Either;
 
 use core::{
 	ops::{
@@ -537,27 +536,19 @@ where
 	/// assert_eq!(src, [0x3F, 0xFC]);
 	/// ```
 	fn not(self) -> Self::Output {
-		match self.bitptr().domain().splat() {
-			Either::Right((h, e, t)) => {
-				for n in *h .. *t {
-					e.invert_bit::<O>(n.idx());
-				}
+		match self.domain_mut() {
+			DomainMut::Enclave { head, elem, tail } => {
+				elem.invert_bits(O::mask(head, tail));
 			},
-			Either::Left((h, b, t)) => {
-				if let Some((h, head)) = h {
-					for n in *h .. T::BITS {
-						head.invert_bit::<O>(n.idx())
-					}
+			DomainMut::Region { head, body, tail } => {
+				if let Some((h, head)) = head {
+					head.invert_bits(O::mask(h, None));
 				}
-				if let Some(body) = b {
-					for elt in body {
-						elt.store(!elt.load());
-					}
+				for elem in body {
+					elem.set_elem(!elem.get_elem());
 				}
-				if let Some((tail, t)) = t {
-					for n in 0 .. *t {
-						tail.invert_bit::<O>(n.idx())
-					}
+				if let Some((tail, t)) = tail {
+					tail.invert_bits(O::mask(None, t));
 				}
 			},
 		}
@@ -631,9 +622,9 @@ where
 		}
 		//  If the slice fully owns its memory, then a fast path is available
 		//  with element-wise `memmove`.
-		if self.bitptr().domain().is_spanning() {
+		if self.domain().is_spanning() {
 			//  Compute the shift distance measured in elements.
-			let offset = shamt >> T::INDX;
+			let offset = shamt >> T::Mem::INDX;
 			//  Compute the number of elements that will remain.
 			let rem = self.bitptr().elements() - offset;
 
@@ -663,7 +654,7 @@ where
 			}
 			//  Any remaining shift amount only needs to shift the `after` block
 			//  above.
-			self[.. rem << T::INDX] <<= shamt & T::INDX as usize;
+			self[.. rem << T::Mem::INDX] <<= shamt & T::Mem::INDX as usize;
 			return;
 		}
 		//  Otherwise, crawl.
@@ -740,9 +731,9 @@ where
 		}
 		//  If the slice fully owns its memory, then a fast path is available
 		//  with element-wise `memmove`.
-		if self.bitptr().domain().is_spanning() {
+		if self.domain().is_spanning() {
 			//  Compute the shift amount measured in elements.
-			let offset = shamt >> T::INDX;
+			let offset = shamt >> T::Mem::INDX;
 			// Compute the number of elements that will remain.
 			let rem = self.bitptr().elements() - offset;
 
@@ -765,7 +756,7 @@ where
 			}
 			//  Any remaining shift amount only needs to shift the `after` block
 			//  above.
-			self[offset << T::INDX ..] >>= shamt & T::INDX as usize;
+			self[offset << T::Mem::INDX ..] >>= shamt & T::Mem::INDX as usize;
 			return;
 		}
 		//  Otherwise, crawl.

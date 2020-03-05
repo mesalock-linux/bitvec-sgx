@@ -1,334 +1,264 @@
-/*! Bit management
+/*! Memory management.
 
-The `BitStore` trait defines constants and associated functions suitable for
-managing the bit patterns of a fundamental, and is the constraint for the
-storage type of the data structures of the rest of the crate.
-
-The other types in this module provide stronger rules about how indices map to
-concrete bits in fundamental elements. They are implementation details, and are
-not exported in the prelude.
+The `BitStore` trait defines the types that can be used in `bitvec` data
+structures, and describes how those data structures are allowed to access the
+memory they govern.
 !*/
 
 use crate::{
 	access::BitAccess,
-	indices::BitIdx,
-	order::BitOrder,
+	mem::BitMemory,
 };
 
-use core::{
-	convert::TryInto,
-	fmt::{
-		Binary,
-		Debug,
-		Display,
-		LowerHex,
-		UpperHex,
-	},
-	mem::size_of,
-	ops::{
-		BitAnd,
-		BitAndAssign,
-		BitOr,
-		BitOrAssign,
-		Not,
-		Shl,
-		ShlAssign,
-		Shr,
-		ShrAssign,
-	},
-};
-
-use radium::marker::BitOps;
+use core::cell::Cell;
 
 #[cfg(feature = "atomic")]
 use core::sync::atomic;
 
-#[cfg(not(feature = "atomic"))]
-use core::cell::Cell;
+/** Generalize over types which may be used to access memory holding bits.
 
-/** Generalizes over the fundamental types for use in `bitvec` data structures.
+This trait is implemented on the fundamental integers, their `Cell<>` wrappers,
+and (if present) their `Atomic` variants. Users provide this type as a parameter
+to their data structures in order to inform the structure of how it may access
+memory.
 
-This trait must only be implemented on unsigned integer primitives with full
-alignment. It cannot be implemented on `u128` on any architecture, or on `u64`
-on 32-bit systems.
+Specifically, this has the advantage that a `BitSlice<_, Cell<_>>` knows that it
+has a view of memory that will not undergo concurrent modification. As such, it
+can skip using atomic accesses, and just use ordinary load/store instructions,
+without fear of causing observable race conditions.
 
-The `Sealed` supertrait ensures that this can only be implemented locally, and
-will never be implemented by downstream crates on new types.
+The associated types `Mem` and `Alias` allow implementors to know the register
+width of the memory they describe (`Mem`) and to change the aliasing status of
+a slice.
+
+A universal property of `BitSlice` regions is that for any handle, it may be
+described as a triad of:
+
+- zero or one partially-used, aliased, elements at the head
+- zero or more wholly-used, unaliased, elements in the body
+- zero or one partially-used, aliased, elements at the tail
+
+As such, a `&BitSlice` reference with any aliasing type can be split into its
+`Self::Alias` variant for the edges, and `Cell<Self::Mem>` for the interior,
+without violating memory safety.
 **/
-pub trait BitStore:
-	//  Forbid external implementation
-	Sealed
-	+ Binary
-	//  Element-wise binary manipulation
-	+ BitAnd<Self, Output = Self>
-	+ BitAndAssign<Self>
-	+ BitOr<Self, Output = Self>
-	+ BitOrAssign<Self>
-	//  Permit indexing into a generic array
-	+ Copy
-	+ Debug
-	+ Display
-	//  Permit testing a value against 0 in `get()`.
-	+ Eq
-	//  Rust treats numeric literals in code as vaguely typed and does not make
-	//  them concrete until long after trait expansion, so this enables building
-	//  a concrete Self value from a numeric literal.
-	+ From<u8>
-	//  Permit extending into a `usize`.
-	+ TryInto<usize>
-	+ LowerHex
-	+ Not<Output = Self>
-	+ Send
-	+ Shl<u8, Output = Self>
-	+ ShlAssign<u8>
-	+ Shr<u8, Output = Self>
-	+ ShrAssign<u8>
-	//  Allow direct access to a concrete implementor type.
-	+ Sized
-	+ Sync
-	+ UpperHex
-	+ BitOps
-{
-	/// The width, in bits, of this type.
-	const BITS: u8 = size_of::<Self>() as u8 * 8;
+pub trait BitStore: seal::Sealed + Sized {
+	/// The fundamental integer type of the governed memory.
+	type Mem: BitMemory + Into<Self>;
+	/// The type used for performing memory accesses.
+	type Access: BitAccess<Self::Mem> + BitStore;
+	/// The destination type when marking a region as known-aliased.
+	type Alias: BitStore + BitAccess<Self::Mem>;
+	/// The destination type when marking a region as known-unaliased.
+	type NoAlias: BitStore;
 
-	/// The number of bits required to index a bit inside the type. This is
-	/// always log<sub>2</sub> of the type’s bit width.
-	const INDX: u8 = Self::BITS.trailing_zeros() as u8;
-
-	/// The bitmask to turn an arbitrary number into a bit index. Bit indices
-	/// are always stored in the lowest bits of an index value.
-	const MASK: u8 = Self::BITS - 1;
-
-	/// The value with all bits unset.
-	const FALSE: Self;
-
-	/// The value with all bits set.
-	const TRUE: Self;
-
-	/// Name of the implementing type. This is only necessary until the compiler
-	/// stabilizes `type_name()`.
-	const TYPENAME: &'static str;
-
-	/// Shared/mutable access wrapper.
+	/// Mark whether a type is threadsafe when viewed as bits.
 	///
-	/// Within `&BitSlice` and `&mut BitSlice` contexts, the `Access` type
-	/// governs all access to underlying memory that may be contended by
-	/// multiple slices. When a codepath knows that it has full, uncontended
-	/// ownership of a memory element of `Self`, and no other codepath may
-	/// observe or modify it, then that codepath may skip the `Access` type and
-	/// use plain accessors.
-	type Access: BitAccess<Self>;
+	/// This is necessary because `Cell<T: Send>` is `Send`, but `Cell` is *not*
+	/// synchronized and thus cannot be used for aliasing, parallel, bit
+	/// manipulation.
+	#[doc(hidden)]
+	type Threadsafe;
 
-	/// Gets a specific bit in an element.
-	///
-	/// # Safety
-	///
-	/// This method cannot be called from within an `&BitSlice` context; it may
-	/// only be called by construction of an `&Self` reference from a `Self`
-	/// element directly.
+	/* Note: The `NoAlias` type had its `BitAccess` bound removed so that the
+	integers and atoms could form a cycle, rather than trending into `Cell`.
+	This had the unpleasant side effect of making `T::NoAlias` use sites much
+	less pleasant to use in generic contexts, due to the inability of the Rust
+	type system to unwind associated types. This removal necessitated the
+	addition of the `.retype()` method in `BitMemory`, and the `.get_elem()` and
+	`.set_elem()` methods below.
+
+	Attempting to do this same `BitAccess` bound removal on `Alias` proved to
+	be *extremely* awful, as the change required adding these new methods
+	throughout the crate. This is needless spaghetti code, required only by the
+	inadequacy of the type system to smoothly handle the graph of associated
+	types used in this crate. It is, to be fair, my fault for attempting to
+	cause cycles, when the type system expects a DAG.
+
+	Long story short: don’t try to remove the bound in the future. It needs to
+	stay off of `NoAlias`, because making a `BitAccess` wrapper type for the
+	integers is profoundly unpleasant. Don’t do that either.
+
+	Hopefully, the aliasing detection work is the last major overhaul of the
+	memory access system, and these modules will be left alone unless
+	demonstrated to be unsound.
+	*/
+
+	/// Gets the memory element behind this reference, mediated through
+	/// `Self::Access`.
 	///
 	/// # Parameters
 	///
 	/// - `&self`
-	/// - `place`: A bit index in the element. The bit under this index, as
-	///   governed by the `O` `BitOrder`, will be retrieved as a `bool`.
 	///
 	/// # Returns
 	///
-	/// The value of the bit under `place`.
-	///
-	/// # Type Parameters
-	///
-	/// - `O`: A `BitOrder` implementation to translate the index into a position.
-	fn get<O>(&self, place: BitIdx<Self>) -> bool
-	where O: BitOrder {
-		*self & *O::mask(place) != Self::FALSE
+	/// The current value of the referent element.
+	fn get_elem(&self) -> Self::Mem {
+		unsafe { &*(self as *const Self as *const Self::Access) }.load()
 	}
 
-	/// Sets a specific bit in an element to a given value.
-	///
-	/// # Safety
-	///
-	/// This method cannot be called from within an `&mut BitSlice` context; it
-	/// may only be called by construction of an `&mut Self` reference from a
-	/// `Self` element directly.
+	/// Sets the memory element behind this reference, mediated through
+	/// `Self::Access`.
 	///
 	/// # Parameters
 	///
-	/// - `place`: A bit index in the element. The bit under this index, as
-	///   governed by the `O` `BitOrder`, will be set according to `value`.
-	///
-	/// # Type Parameters
-	///
-	/// - `O`: A `BitOrder` implementation to translate the index into a position.
-	fn set<O>(&mut self, place: BitIdx<Self>, value: bool)
-	where O: BitOrder {
-		let mask = *O::mask(place);
-		if value {
-			*self |= mask;
-		}
-		else {
-			*self &= !mask;
-		}
-	}
-
-	/// Counts how many bits in `self` are set to `1`.
-	///
-	/// This zero-extends `self` to `usize`, and uses the [`usize::count_ones`]
-	/// inherent method.
-	///
-	/// # Parameters
-	///
-	/// - `self`
-	///
-	/// # Returns
-	///
-	/// The number of bits in `self` set to `1`. This is a `usize` instead of a
-	/// `u32` in order to ease arithmetic throughout the crate.
-	///
-	/// # Examples
-	///
-	/// ```rust
-	/// use bitvec::prelude::BitStore;
-	/// assert_eq!(BitStore::count_ones(0u8), 0);
-	/// assert_eq!(BitStore::count_ones(128u8), 1);
-	/// assert_eq!(BitStore::count_ones(192u8), 2);
-	/// assert_eq!(BitStore::count_ones(224u8), 3);
-	/// assert_eq!(BitStore::count_ones(240u8), 4);
-	/// assert_eq!(BitStore::count_ones(248u8), 5);
-	/// assert_eq!(BitStore::count_ones(252u8), 6);
-	/// assert_eq!(BitStore::count_ones(254u8), 7);
-	/// assert_eq!(BitStore::count_ones(255u8), 8);
-	/// ```
-	///
-	/// [`usize::count_ones`]: https://doc.rust-lang.org/stable/std/primitive.usize.html#method.count_ones
-	#[inline(always)]
-	fn count_ones(self) -> usize {
-		let extended = self.try_into()
-			.unwrap_or_else(|_| unreachable!("This conversion is infallible"));
-		//  Ensure that this calls the inherent method in `impl usize`, not the
-		//  trait method in `impl BitStore for usize`.
-		usize::count_ones(extended) as usize
-	}
-
-	/// Counts how many bits in `self` are set to `0`.
-	///
-	/// This inverts `self`, so all `0` bits are `1` and all `1` bits are `0`,
-	/// then zero-extends `self` to `usize` and uses the [`usize::count_ones`]
-	/// inherent method.
-	///
-	/// # Parameters
-	///
-	/// - `self`
-	///
-	/// # Returns
-	///
-	/// The number of bits in `self` set to `0`. This is a `usize` instead of a
-	/// `u32` in order to ease arithmetic throughout the crate.
-	///
-	/// # Examples
-	///
-	/// ```rust
-	/// use bitvec::prelude::BitStore;
-	/// assert_eq!(BitStore::count_zeros(0u8), 8);
-	/// assert_eq!(BitStore::count_zeros(1u8), 7);
-	/// assert_eq!(BitStore::count_zeros(3u8), 6);
-	/// assert_eq!(BitStore::count_zeros(7u8), 5);
-	/// assert_eq!(BitStore::count_zeros(15u8), 4);
-	/// assert_eq!(BitStore::count_zeros(31u8), 3);
-	/// assert_eq!(BitStore::count_zeros(63u8), 2);
-	/// assert_eq!(BitStore::count_zeros(127u8), 1);
-	/// assert_eq!(BitStore::count_zeros(255u8), 0);
-	/// ```
-	///
-	/// [`usize::count_ones`]: https://doc.rust-lang.org/stable/std/primitive.usize.html#method.count_ones
-	#[inline(always)]
-	fn count_zeros(self) -> usize {
-		//  invert (0 becomes 1, 1 becomes 0), zero-extend, count ones
-		<Self as BitStore>::count_ones(!self)
+	/// - `&mut self`: Even when aliased, you must have exclusive control of the
+	///   referent element to set it to a new value.
+	/// - `value`: The new value to write into the referent element.
+	fn set_elem(&mut self, value: Self::Mem) {
+		unsafe { &*(self as *mut Self as *mut Self::Access) }.store(value);
 	}
 }
 
-/** Compute the number of elements required to store a number of bits.
-
-# Parameters
-
-- `bits`: The number of bits to store in an element `T` array.
-
-# Returns
-
-The number of elements `T` required to store `bits`.
-
-Because this is a const function, when `bits` is a const-expr, this function can
-be used in array types `[T; elts(len)]`.
-**/
-#[doc(hidden)]
-pub const fn elts<T>(bits: usize) -> usize {
-	let width: usize = size_of::<T>() * 8;
-	bits / width + (bits % width != 0) as usize
-}
-
-/// Batch implementation of `BitStore` for the appropriate fundamental integers.
+/// Batch implementation of `BitStore` for appropriate types.
 macro_rules! bitstore {
-	($($t:ty => $bits:literal , $atom:ty ;)*) => { $(
+	($($t:ty => $a:ty),* $(,)?) => { $(
+		impl seal::Sealed for $t {}
+
 		impl BitStore for $t {
-			const TYPENAME: &'static str = stringify!($t);
-
-			const FALSE: Self = 0;
-			const TRUE: Self = !0;
-
-			#[cfg(feature = "atomic")]
-			type Access = $atom;
-
-			#[cfg(not(feature = "atomic"))]
+			/// The unsigned integers are only the `BitStore` parameter for
+			/// unaliased slices.
 			type Access = Cell<Self>;
 
-			#[inline(always)]
-			fn count_ones(self) -> usize {
-				Self::count_ones(self) as usize
-			}
+			/// Aliases are required to use atomic access, as `BitSlice`s of
+			/// this type are safe to move across threads.
+			#[cfg(feature = "atomic")]
+			type Alias = $a;
+
+			/// Aliases are permitted to use `Cell` wrappers and ordinary
+			/// access, as `BitSlice`s of this type are forbidden from crossing
+			/// threads.
+			#[cfg(not(feature = "atomic"))]
+			type Alias = Cell<Self>;
+
+			type Mem = Self;
+
+			type NoAlias = Self;
+
+			#[doc(hidden)]
+			type Threadsafe = Self;
+		}
+
+		#[cfg(feature = "atomic")]
+		impl seal::Sealed for $a {}
+
+		#[cfg(feature = "atomic")]
+		impl BitStore for $a {
+			/// Atomic stores always use atomic accesses.
+			type Access = Self;
+
+			type Alias = Self;
+
+			type Mem = $t;
+
+			type NoAlias = $t;
+
+			#[doc(hidden)]
+			type Threadsafe = Self;
+		}
+
+		impl seal::Sealed for Cell<$t> {}
+
+		impl BitStore for Cell<$t> {
+			/// `Cell`s always use ordinary, unsynchronized, accesses, as the
+			/// type system forbids them from creating memory collisions.
+			type Access = Self;
+
+			type Alias = Self;
+
+			type Mem = $t;
+
+			type NoAlias = Self;
+
+			/// Raw pointers are never threadsafe, so this prevents
+			/// `BitSlice<_, Cell<_>>` from crossing threads.
+			#[doc(hidden)]
+			type Threadsafe = *const Self;
 		}
 	)* };
 }
 
-bitstore! {
-	u8 => 1, atomic::AtomicU8;
-	u16 => 2, atomic::AtomicU16;
-	u32 => 4, atomic::AtomicU32;
-}
-
-#[cfg(target_pointer_width = "32")]
-bitstore! {
-	usize => 4, atomic::AtomicUsize;
-}
+bitstore!(
+	u8 => atomic::AtomicU8,
+	u16 => atomic::AtomicU16,
+	u32 => atomic::AtomicU32,
+	usize => atomic::AtomicUsize,
+);
 
 #[cfg(target_pointer_width = "64")]
-bitstore! {
-	u64 => 8, atomic::AtomicU64;
-	usize => 8, atomic::AtomicUsize;
-}
+bitstore!(u64 => atomic::AtomicU64);
 
 #[cfg(not(any(target_pointer_width = "32", target_pointer_width = "64")))]
-compile_fail!("This architecture is currently not supported. File an issue at https://github.com/myrrlyn/bitvec");
+compile_fail!(concat!(
+	"This architecture is currently not supported. File an issue at ",
+	env!("CARGO_PKG_REPOSITORY")
+));
 
-/** Marker trait to seal `BitStore` against downstream implementation.
-
-This trait is public in the module, so that other modules in the crate can use
-it, but so long as it is not exported by the crate root and this module is
-private, this trait effectively forbids downstream implementation of the
-`BitStore` trait.
-**/
-#[doc(hidden)]
-pub trait Sealed {}
-
-macro_rules! seal {
-	($($t:ty),*) => { $(
-		impl Sealed for $t {}
-	)* };
+/// Enclose the `Sealed` trait against client use.
+mod seal {
+	/// Marker trait to seal `BitStore` against downstream implementation.
+	///
+	/// This trait is public in the module, so that other modules in the crate
+	/// can use it, but so long as it is not exported by the crate root and this
+	/// module is private, this trait effectively forbids downstream
+	/// implementation of the `BitStore` trait.
+	#[doc(hidden)]
+	pub trait Sealed {}
 }
 
-seal!(u8, u16, u32, usize);
+//  This test must be disabled while `static_assertions` has a bug.
+//  Rust doesn’t offer a `cfg(false)`, so this selects a valid key with an
+//  impossible value.
+#[cfg(target_endian = "disabled")]
+#[cfg(test)]
+mod tests {
+	use crate::prelude::*;
+	use core::cell::Cell;
+	use static_assertions::*;
 
-#[cfg(target_pointer_width = "64")]
-seal!(u64);
+	#[test]
+	fn traits() {
+		//  The integers are threadsafe, as they are known to be unaliased.
+		assert_impl_all!(BitSlice<Local, u8>: Send, Sync);
+		assert_impl_all!(BitSlice<Local, u16>: Send, Sync);
+		assert_impl_all!(BitSlice<Local, u32>: Send, Sync);
+		assert_impl_all!(BitSlice<Local, usize>: Send, Sync);
+
+		#[cfg(target_pointer_width = "64")]
+		assert_impl_all!(BitSlice<Local, u64>: Send, Sync);
+
+		//  The integer alias is threadsafe when atomics are enabled.
+		#[cfg(feature = "atomic")]
+		{
+			assert_impl_all!(BitSlice<Local, <u8 as BitStore>::Alias>: Send, Sync);
+			assert_impl_all!(BitSlice<Local, <u16 as BitStore>::Alias>: Send, Sync);
+			assert_impl_all!(BitSlice<Local, <u32 as BitStore>::Alias>: Send, Sync);
+			assert_impl_all!(BitSlice<Local, <usize as BitStore>::Alias>: Send, Sync);
+
+			#[cfg(target_pointer_width = "64")]
+			assert_impl_all!(BitSlice<Local, <u64 as BitStore>::Alias>: Send, Sync);
+		}
+
+		//  The integer alias is thread unsafe when atomics are disabled.
+		#[cfg(not(feature = "atomic"))]
+		{
+			assert_not_impl_any!(BitSlice<Local, <u8 as BitStore>::Alias>: Send, Sync);
+			assert_not_impl_any!(BitSlice<Local, <u16 as BitStore>::Alias>: Send, Sync);
+			assert_not_impl_any!(BitSlice<Local, <u32 as BitStore>::Alias>: Send, Sync);
+			assert_not_impl_any!(BitSlice<Local, <usize as BitStore>::Alias>: Send, Sync);
+
+			#[cfg(target_pointer_width = "64")]
+			assert_not_impl_any!(BitSlice<Local, <u64 as BitStore>::Alias>: Send, Sync);
+		}
+
+		//  `Cell`s are never threadsafe.
+		assert_not_impl_any!(BitSlice<Local, Cell<u8>>: Send, Sync);
+		assert_not_impl_any!(BitSlice<Local, Cell<u16>>: Send, Sync);
+		assert_not_impl_any!(BitSlice<Local, Cell<u32>>: Send, Sync);
+		assert_not_impl_any!(BitSlice<Local, Cell<usize>>: Send, Sync);
+
+		#[cfg(target_pointer_width = "64")]
+		assert_not_impl_any!(BitSlice<Local, Cell<u64>>: Send, Sync);
+	}
+}
