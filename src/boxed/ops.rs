@@ -7,7 +7,10 @@ use crate::{
 	store::BitStore,
 };
 
-use std::slice;
+use std::{
+    boxed::Box,
+    slice,
+};
 
 use core::ops::{
 	Add,
