@@ -1763,7 +1763,7 @@ where
 
 		while by > 0 {
 			//  Clamp the collection count by the word size and shift distance.
-			let shamt = cmp::min(usize::BITS as usize, by);
+			let shamt = cmp::min(<usize as BitStore>::BITS as usize, by);
 			//  Bounds checking is already performed. This block erases all
 			//  interior checks in the iteration body.
 			unsafe {
@@ -1839,7 +1839,7 @@ where
 
 		while by > 0 {
 			//  Clamp the collection count by the word size and shift distance.
-			let shamt = cmp::min(usize::BITS as usize, by);
+			let shamt = cmp::min(<usize as BitStore>::BITS as usize, by);
 			//  Bounds checking is already performed. This block erases all
 			//  interior checks in the iteration body.
 			unsafe {
